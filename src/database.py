@@ -84,7 +84,7 @@ class Task(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
-    column: Mapped[str] = mapped_column(
+    board_column: Mapped[str] = mapped_column(
         String(20), default="backlog"
     )
     assignee_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"))
@@ -99,9 +99,9 @@ class Task(Base):
 
     __table_args__ = (
         CheckConstraint(
-            '"column" IN (\'backlog\', \'running\', \'blocked\', \'review\', \'done\')',
-            name="task_column_check",
-        ),
+                    "board_column IN ('backlog', 'running', 'blocked', 'review', 'done')",
+                    name="task_column_check",
+                ),
         CheckConstraint(
             "complexity IN ('XS', 'S', 'M', 'L', 'XL') OR complexity IS NULL",
             name="task_complexity_check",

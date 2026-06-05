@@ -23,10 +23,10 @@
                 {% elif col == 'done' %}✅ Done
                 {% endif %}
             </h3>
-            <span class="task-count">{{ tasks|selectattr('column', 'equalto', col)|list|length }}</span>
+            <span class="task-count">{{ tasks|selectattr('board_column', 'equalto', col)|list|length }}</span>
         </div>
         <div class="card-list" data-column="{{ col }}" ondrop="drop(event)" ondragover="allowDrop(event)">
-            {% for task in tasks if task.column == col %}
+            {% for task in tasks if task.board_column == col %}
             <div class="task-card" draggable="true" ondragstart="drag(event)" data-task-id="{{ task.id }}" onclick="showTaskDetail({{ task.id }})">
                 <div class="card-header">
                     <span class="card-title">{{ task.title }}</span>

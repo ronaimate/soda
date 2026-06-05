@@ -295,7 +295,7 @@ def create_app() -> FastAPI:
                     "id": t.id,
                     "title": t.title,
                     "description": t.description,
-                    "column": t.column,
+                    "column": t.board_column,
                     "assignee_id": t.assignee_id,
                     "complexity": t.complexity,
                     "position": t.position,
@@ -332,7 +332,7 @@ def create_app() -> FastAPI:
             session.add(task)
             await session.commit()
             await session.refresh(task)
-            return {"id": task.id, "title": task.title, "column": task.column}
+            return {"id": task.id, "title": task.title, "column": task.board_column}
 
     @app.get("/api/tasks/{task_id}")
     async def get_task(task_id: int):
@@ -352,7 +352,7 @@ def create_app() -> FastAPI:
                 "project_id": task.project_id,
                 "title": task.title,
                 "description": task.description,
-                "column": task.column,
+                "column": task.board_column,
                 "assignee_id": task.assignee_id,
                 "complexity": task.complexity,
                 "position": task.position,
@@ -401,13 +401,13 @@ def create_app() -> FastAPI:
             if not task:
                 raise HTTPException(404, "Task not found")
 
-            old_column = task.column
+            old_column = task.board_column
             new_column = payload.column
 
             if new_column not in ("backlog", "running", "blocked", "review", "done"):
                 raise HTTPException(400, f"Invalid column: {new_column}")
 
-            task.column = new_column
+            task.board_column = new_column
 
             # If moving to Running and assignee is an AI user, execute command
             if new_column == "running":
@@ -773,7 +773,7 @@ If you're ready to generate:
                 raise HTTPException(404, "Task not found")
 
             if payload.status == "blocked" and payload.question:
-                task.column = "blocked"
+                task.board_column = "blocked"
                 comment = TaskComment(
                     task_id=task.id,
                     author="AI",
@@ -782,7 +782,7 @@ If you're ready to generate:
                 session.add(comment)
 
             elif payload.status == "review":
-                task.column = "review"
+                task.board_column = "review"
                 if payload.summary:
                     comment = TaskComment(
                         task_id=task.id,
@@ -831,7 +831,7 @@ Return your review as JSON:
                 del running_processes[payload.taskId]
 
             await session.commit()
-            return {"ok": True, "column": task.column}
+            return {"ok": True, "column": task.board_column}
 
     # ── API: Git Commit & Push ─────────────────────────────────────
 
@@ -890,7 +890,7 @@ Return your review as JSON:
             if not task:
                 raise HTTPException(404, "Task not found")
             
-            if task.column != "done":
+            if task.board_column != "done":
                 raise HTTPException(400, "Task must be in 'done' column to commit")
             
             # Get git settings
@@ -958,7 +958,7 @@ Return your review as JSON:
                 task_info_file = workdir / f"task-{task_id}-info.md"
                 task_info = f"""# Task {task_id}: {task.title}
 
-**Status:** {task.column}
+**Status:** {task.board_column}
 **Created:** {task.created_at}
 **Description:**
 {task.description or 'No description'}
