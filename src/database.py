@@ -99,7 +99,7 @@ class Task(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "column IN ('backlog', 'running', 'blocked', 'review', 'done')",
+            '"column" IN (\'backlog\', \'running\', \'blocked\', \'review\', \'done\')',
             name="task_column_check",
         ),
         CheckConstraint(
@@ -139,6 +139,19 @@ class GlobalSetting(Base):
 
     key: Mapped[str] = mapped_column(String(255), primary_key=True)
     value: Mapped[Optional[str]] = mapped_column(Text)
+
+
+class TaskGitState(Base):
+    __tablename__ = "task_git_state"
+
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True
+    )
+    repo: Mapped[Optional[str]] = mapped_column(String(255))
+    branch: Mapped[Optional[str]] = mapped_column(String(255))
+    workdir: Mapped[Optional[str]] = mapped_column(Text)
+    last_commit: Mapped[Optional[str]] = mapped_column(String(40))
+    last_pushed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
 async def init_db():

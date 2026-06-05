@@ -108,6 +108,29 @@
     </div>
 </div>
 
+<!-- Git Commit Modal -->
+<div id="git-commit-modal" class="modal" style="display:none">
+    <div class="modal-content">
+        <span class="modal-close" onclick="closeModal('git-commit-modal')">&times;</span>
+        <h2>📦 Commit & Push</h2>
+        <form onsubmit="return gitCommitPush(event)">
+            <label>Commit Message</label>
+            <textarea name="commit_message" rows="3" required>Task {{ taskId }} completed</textarea>
+            
+            <label>Repository (optional - leave empty for default)</label>
+            <input type="text" name="repo_override" placeholder="owner/repo">
+            
+            <label>Branch (optional - leave empty for default)</label>
+            <input type="text" name="branch_override" placeholder="main">
+            
+            <div class="git-status" id="git-status"></div>
+            
+            <button type="submit" class="btn btn-primary">Commit & Push</button>
+            <button type="button" class="btn btn-secondary" onclick="closeModal('git-commit-modal')">Cancel</button>
+        </form>
+    </div>
+</div>
+
 <script>
 // ── Drag & Drop ──────────────────────────────────────
 function allowDrop(e) { e.preventDefault(); }
@@ -169,6 +192,7 @@ async function showTaskDetail(taskId) {
             <button class="btn btn-sm" onclick="moveTask(${taskId}, 'running')">▶ Running</button>
             <button class="btn btn-sm" onclick="moveTask(${taskId}, 'done')">✓ Done</button>
             <button class="btn btn-sm btn-danger" onclick="deleteTask(${taskId})">🗑 Delete</button>
+            ${task.column === 'done' ? `<button class="btn btn-sm btn-success" onclick="showGitCommitModal(${taskId})">📦 Commit & Push</button>` : ''}
         </div>
     </div>`;
 
@@ -242,5 +266,48 @@ document.querySelectorAll('.modal').forEach(m => {
         if (e.target === m) m.style.display = 'none';
     });
 });
+
+// ── Git Commit & Push ─────────────────────────────────
+function showGitCommitModal(taskId) {
+    document.getElementById('git-commit-modal').dataset.taskId = taskId;
+    document.getElementById('git-commit-modal').style.display = 'flex';
+}
+
+async function gitCommitPush(e) {
+    e.preventDefault();
+    const modal = document.getElementById('git-commit-modal');
+    const taskId = modal.dataset.taskId;
+    const fd = new FormData(e.target);
+    
+    const statusDiv = document.getElementById('git-status');
+    statusDiv.textContent = 'Committing and pushing...';
+    statusDiv.style.color = '#3498db';
+    
+    try {
+        const res = await fetch(`/api/tasks/${taskId}/git-commit`, {
+            method: 'POST',
+            body: fd
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok && data.success) {
+            statusDiv.textContent = `✓ ${data.message}`;
+            statusDiv.style.color = '#2ecc71';
+            setTimeout(() => {
+                closeModal('git-commit-modal');
+                window.location.reload();
+            }, 2000);
+        } else {
+            statusDiv.textContent = `✗ Error: ${data.detail || data.error || 'Unknown error'}`;
+            statusDiv.style.color = '#e74c3c';
+        }
+    } catch (err) {
+        statusDiv.textContent = `✗ Network error: ${err.message}`;
+        statusDiv.style.color = '#e74c3c';
+    }
+    
+    return false;
+}
 </script>
 {% endblock %}

@@ -4,10 +4,12 @@ import os
 import re
 import subprocess
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
+import git
+import httpx
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,7 +18,7 @@ from pydantic import BaseModel
 
 from .database import (
     GlobalSetting, Idea, Project, Task, TaskComment, TaskDependency, User,
-    async_session, init_db, sa_select,
+    TaskGitState, async_session, init_db, sa_select,
 )
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -740,15 +742,25 @@ If you're ready to generate:
             return {row.key: row.value for row in result.scalars().all()}
 
     @app.patch("/api/settings")
-    async def update_settings(callback_url: str = Form(...)):
+    async def update_settings(request: Request):
+        """Update global settings. Accepts all settings as form data."""
+        data = await request.form()
+        
         async with async_session() as session:
-            setting = await session.get(GlobalSetting, "callback_url")
-            if setting:
-                setting.value = callback_url
-            else:
-                session.add(GlobalSetting(key="callback_url", value=callback_url))
+            for key, value in data.items():
+                result = await session.execute(
+                    sa_select(GlobalSetting).where(GlobalSetting.key == key)
+                )
+                setting = result.scalar_one_or_none()
+                
+                if setting:
+                    setting.value = value
+                else:
+                    session.add(GlobalSetting(key=key, value=value))
+            
             await session.commit()
-            return {"ok": True}
+        
+        return {"ok": True, "updated": list(data.keys())}
 
     # ── API: Callback ──────────────────────────────────────────────
 
@@ -820,6 +832,177 @@ Return your review as JSON:
 
             await session.commit()
             return {"ok": True, "column": task.column}
+
+    # ── API: Git Commit & Push ─────────────────────────────────────
+
+    async def _get_setting(session, key: str, default: str = "") -> str:
+        """Helper to get a global setting value."""
+        result = await session.execute(
+            sa_select(GlobalSetting).where(GlobalSetting.key == key)
+        )
+        setting = result.scalar_one_or_none()
+        return setting.value if setting else default
+
+    async def _ensure_github_repo(owner: str, repo_name: str, token: str) -> dict:
+        """Ensure the GitHub repository exists, create if it doesn't."""
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        # Check if repo exists
+        async with httpx.AsyncClient() as client:
+            check_url = f"https://api.github.com/repos/{owner}/{repo_name}"
+            check_resp = await client.get(check_url, headers=headers)
+            
+            if check_resp.status_code == 200:
+                return {"status": "exists", "data": check_resp.json()}
+            
+            if check_resp.status_code != 404:
+                return {"status": "error", "message": f"GitHub API error: {check_resp.text}"}
+            
+            # Create the repository
+            create_url = "https://api.github.com/user/repos"
+            create_data = {
+                "name": repo_name,
+                "private": True,
+                "auto_init": True,  # Create with README
+                "description": f"Created by Soda for task management"
+            }
+            create_resp = await client.post(create_url, headers=headers, json=create_data)
+            
+            if create_resp.status_code in [200, 201]:
+                return {"status": "created", "data": create_resp.json()}
+            else:
+                return {"status": "error", "message": f"Failed to create repo: {create_resp.text}"}
+
+    @app.post("/api/tasks/{task_id}/git-commit")
+    async def git_commit_push(
+        task_id: int,
+        commit_message: str = Form(...),
+        repo_override: str = Form(""),
+        branch_override: str = Form("")
+    ):
+        """Commit and push task workdir changes to GitHub."""
+        async with async_session() as session:
+            # Get task
+            task = await session.get(Task, task_id)
+            if not task:
+                raise HTTPException(404, "Task not found")
+            
+            if task.column != "done":
+                raise HTTPException(400, "Task must be in 'done' column to commit")
+            
+            # Get git settings
+            username = await _get_setting(session, "git_username")
+            token = await _get_setting(session, "git_token")
+            default_repo = await _get_setting(session, "git_default_repo")
+            default_branch = await _get_setting(session, "git_default_branch", "main")
+            
+            if not username or not token:
+                raise HTTPException(400, "Git username and token must be configured in Settings")
+            
+            # Determine repo and branch
+            repo_name = repo_override if repo_override else default_repo
+            branch = branch_override if branch_override else default_branch
+            
+            if not repo_name:
+                raise HTTPException(400, "Repository must be specified or set as default in Settings")
+            
+            # Ensure repo exists
+            ensure_result = await _ensure_github_repo(username, repo_name, token)
+            if ensure_result["status"] == "error":
+                raise HTTPException(400, ensure_result["message"])
+            
+            # Get or create task git state
+            result = await session.execute(
+                sa_select(TaskGitState).where(TaskGitState.task_id == task_id)
+            )
+            git_state = result.scalar_one_or_none()
+            
+            if not git_state:
+                git_state = TaskGitState(task_id=task_id)
+                session.add(git_state)
+            
+            # Setup local workdir
+            workdir_base = Path("/tmp/soda-git-workdirs")
+            workdir_base.mkdir(parents=True, exist_ok=True)
+            workdir = workdir_base / f"task-{task_id}"
+            
+            repo_url = f"https://{username}:{token}@github.com/{username}/{repo_name}.git"
+            
+            try:
+                # Clone or update repo
+                if workdir.exists():
+                    repo = git.Repo(workdir)
+                    origin = repo.remotes.origin
+                    origin.fetch()
+                    
+                    # Checkout branch
+                    if branch in repo.branches:
+                        repo.git.checkout(branch)
+                    else:
+                        repo.git.checkout('-b', branch)
+                    
+                    origin.pull()
+                else:
+                    repo = git.Repo.clone_from(repo_url, workdir)
+                    
+                    # Checkout or create branch
+                    try:
+                        repo.git.checkout(branch)
+                    except git.exc.GitCommandError:
+                        repo.git.checkout('-b', branch)
+                
+                # Create task info file
+                task_info_file = workdir / f"task-{task_id}-info.md"
+                task_info = f"""# Task {task_id}: {task.title}
+
+**Status:** {task.column}
+**Created:** {task.created_at}
+**Description:**
+{task.description or 'No description'}
+
+---
+*Auto-generated by Soda*
+"""
+                task_info_file.write_text(task_info)
+                
+                # Git operations
+                repo.git.add(A=True)
+                
+                if repo.is_dirty() or repo.untracked_files:
+                    commit = repo.index.commit(commit_message)
+                    repo.git.push('origin', branch)
+                    
+                    git_state.repo = repo_name
+                    git_state.branch = branch
+                    git_state.workdir = str(workdir)
+                    git_state.last_commit = commit.hexsha
+                    git_state.last_pushed_at = datetime.utcnow()
+                    
+                    await session.commit()
+                    
+                    return {
+                        "ok": True,
+                        "commit": commit.hexsha[:8],
+                        "repo": f"{username}/{repo_name}",
+                        "branch": branch,
+                        "message": "Successfully committed and pushed"
+                    }
+                else:
+                    return {
+                        "ok": True,
+                        "commit": None,
+                        "repo": f"{username}/{repo_name}",
+                        "branch": branch,
+                        "message": "No changes to commit"
+                    }
+                    
+            except git.exc.GitCommandError as e:
+                raise HTTPException(500, f"Git error: {str(e)}")
+            except Exception as e:
+                raise HTTPException(500, f"Unexpected error: {str(e)}")
 
     # ── API: Running processes ─────────────────────────────────────
 

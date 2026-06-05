@@ -11,6 +11,30 @@
         <input type="text" name="callback_url" value="{{ settings.get('callback_url', 'http://localhost:8000/api/callback') }}" class="input-mono">
         <p class="help-text">This URL is called by the execute command to report task status. Available in templates as <code>{% raw %}{{callback.url}}{% endraw %}</code>.</p>
 
+        <h3>🔧 Git Integration</h3>
+        <p class="help-text">Configure GitHub credentials to enable "Commit & Push" for tasks in the Done column.</p>
+        
+        <label>GitHub Username</label>
+        <input type="text" name="git_username" value="{{ settings.get('git_username', '') }}" placeholder="your-username" class="input-mono">
+        
+        <label>GitHub Personal Access Token (PAT)</label>
+        <input type="password" name="git_token" value="{{ settings.get('git_token', '') }}" placeholder="ghp_xxxx..." class="input-mono">
+        <div class="info-box">
+            <strong>Required Permissions:</strong>
+            <ul>
+                <li><strong>Classic PAT:</strong> <code>repo</code> scope (full control of private repositories)</li>
+                <li><strong>Fine-grained PAT:</strong> <code>Contents: Read and write</code> + <code>Metadata: Read</code> for target repos</li>
+            </ul>
+            <p>Create a token at: <a href="https://github.com/settings/tokens" target="_blank">github.com/settings/tokens</a></p>
+        </div>
+        
+        <label>Default Repository</label>
+        <input type="text" name="git_default_repo" value="{{ settings.get('git_default_repo', '') }}" placeholder="my-project" class="input-mono">
+        <p class="help-text">Default repo name (without owner). Will be auto-created if it doesn't exist.</p>
+        
+        <label>Default Branch</label>
+        <input type="text" name="git_default_branch" value="{{ settings.get('git_default_branch', 'main') }}" placeholder="main" class="input-mono">
+
         <h3>Task Lifecycle</h3>
         <div class="lifecycle-diagram">
             <div class="lifecycle-step">📋 Backlog</div>
