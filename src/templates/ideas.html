@@ -42,7 +42,7 @@
             {% elif idea.status == 'generated' %}
                 <span class="badge status-generated">✅ Project created</span>
             {% endif %}
-            <button class="btn btn-sm" onclick="showEditIdea({{ idea.id }}, '{{ idea.title|e }}', '{{ (idea.description or '')|e }}', '{{ (idea.system_prompt or '')|e }}', {{ idea.architect_user_id or 'null' }})">Edit</button>
+            <button class="btn btn-sm" onclick="showEditIdea({{ idea.id }}, '{{ idea.title|e }}', '{{ (idea.description or '')|e }}', '{{ (idea.system_prompt or '')|e }}')">Edit</button>
             <button class="btn btn-sm btn-danger" onclick="deleteIdea({{ idea.id }})">Delete</button>
         </div>
     </div>
@@ -65,16 +65,6 @@
             <textarea id="idea-desc" rows="4" placeholder="Describe your idea in detail..."></textarea>
             <label>System Prompt for Architect AI</label>
             <textarea id="idea-system-prompt" rows="3" placeholder="Optional: extra instructions for the Architect when generating tasks..."></textarea>
-            <label>Architect AI</label>
-            <select id="idea-architect">
-                <option value="">Select Architect AI...</option>
-                {% for u in ai_users %}
-                <option value="{{ u.id }}">{{ u.name }} {% if u.model %}({{ u.model }}){% endif %}</option>
-                {% endfor %}
-            </select>
-            {% if not ai_users %}
-            <p class="help-text">⚠️ No AI users yet. <a href="/users">Create an AI user</a> first.</p>
-            {% endif %}
             <button class="btn btn-primary" onclick="createIdea()" style="margin-top:16px">Create Idea</button>
         </div>
     </div>
@@ -93,13 +83,6 @@
             <textarea id="edit-idea-desc" rows="4"></textarea>
             <label>System Prompt for Architect AI</label>
             <textarea id="edit-idea-system-prompt" rows="3"></textarea>
-            <label>Architect AI</label>
-            <select id="edit-idea-architect">
-                <option value="">Select Architect AI...</option>
-                {% for u in ai_users %}
-                <option value="{{ u.id }}">{{ u.name }} {% if u.model %}({{ u.model }}){% endif %}</option>
-                {% endfor %}
-            </select>
             <button class="btn btn-primary" onclick="updateIdea()" style="margin-top:16px">Save</button>
         </div>
     </div>
@@ -162,12 +145,11 @@ function showCreateIdea() {
     document.getElementById('create-idea-modal').style.display = 'flex';
 }
 
-function showEditIdea(id, title, desc, sysPrompt, architectId) {
+function showEditIdea(id, title, desc, sysPrompt) {
     document.getElementById('edit-idea-id').value = id;
     document.getElementById('edit-idea-title').value = title;
     document.getElementById('edit-idea-desc').value = desc;
     document.getElementById('edit-idea-system-prompt').value = sysPrompt;
-    if (architectId) document.getElementById('edit-idea-architect').value = architectId;
     document.getElementById('edit-idea-modal').style.display = 'flex';
 }
 
@@ -177,8 +159,6 @@ async function updateIdea() {
     fd.append('title', document.getElementById('edit-idea-title').value);
     fd.append('description', document.getElementById('edit-idea-desc').value);
     fd.append('system_prompt', document.getElementById('edit-idea-system-prompt').value);
-    const archId = document.getElementById('edit-idea-architect').value;
-    if (archId) fd.append('architect_user_id', archId);
 
     const res = await fetch(`/api/ideas/${id}`, { method: 'PATCH', body: fd });
     if (res.ok) { closeModal('edit-idea-modal'); window.location.reload(); }

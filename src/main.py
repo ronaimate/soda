@@ -593,7 +593,7 @@ def create_app() -> FastAPI:
         logger.info(f"Calling architect {architect.name} with prompt length: {len(prompt)}")
         
         proc = await asyncio.create_subprocess_shell(
-            f'opencode run --prompt {json.dumps(prompt)}',
+            f'opencode run {json.dumps(prompt)}',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -961,6 +961,34 @@ Return ONLY valid JSON, no other text."""
         
         return {"ok": True, "updated": list(data.keys())}
 
+    # ── API: Models ────────────────────────────────────────────────
+
+    @app.get("/api/models")
+    async def list_models():
+        """List available AI models from OpenCode"""
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                "opencode models --json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            
+            if proc.returncode != 0:
+                return []
+            
+            output = stdout.decode().strip()
+            if not output:
+                return []
+            
+            models_data = json.loads(output)
+            # OpenCode returns models with 'id' field
+            return [{"id": m.get("id", "")} for m in models_data if m.get("id")]
+            
+        except Exception as e:
+            print(f"Error fetching models: {e}")
+            return []
+
     # ── API: Callback ──────────────────────────────────────────────
 
     @app.post("/api/callback")
@@ -1006,7 +1034,7 @@ Return your review as JSON:
 {{"approved": true/false, "comments": "..."}}"""
 
                         proc = await asyncio.create_subprocess_shell(
-                            f'opencode run --prompt {json.dumps(review_prompt)}',
+                            f'opencode run {json.dumps(review_prompt)}',
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE,
                         )

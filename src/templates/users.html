@@ -46,18 +46,14 @@
                 <option value="ai">AI</option>
             </select>
             <div id="ai-fields" style="display:none">
-                <label>Provider</label>
-                <select name="provider" id="user-provider">
-                    <option value="">Select...</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="openrouter">OpenRouter</option>
-                    <option value="openai">OpenAI</option>
-                </select>
                 <label>Model</label>
-                <input type="text" name="model" id="user-model" placeholder="e.g. claude-sonnet-4-20250514">
-                <div class="help-text" style="margin-top:8px; padding:8px; background:var(--bg3); border-radius:4px">
-                    <strong>ℹ️ API Key:</strong> Configured globally in <a href="/settings">Settings</a>. All AI users share the same key.
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <select name="model" id="user-model" style="flex:1">
+                        <option value="">Select model...</option>
+                    </select>
+                    <button type="button" class="btn btn-sm" onclick="fetchModels()">🔄 Load</button>
                 </div>
+                <p class="help-text" id="model-help">Click "Load" to fetch available models from OpenCode</p>
                 <label>System Prompt</label>
                 <textarea name="system_prompt" id="user-system-prompt" rows="4" placeholder="Personality and specialty of this AI agent..."></textarea>
                 <label>Execute Command</label>
@@ -79,7 +75,7 @@
 </div>
 
 <script>
-const DEFAULT_EXECUTE_CMD = `opencode run --prompt 'Task: {% raw %}{{task.title}}{% endraw %}
+const DEFAULT_EXECUTE_CMD = `opencode run 'Task: {% raw %}{{task.title}}{% endraw %}
 
 Description: {% raw %}{{task.description}}{% endraw %}
 
@@ -88,6 +84,30 @@ Complexity: {% raw %}{{task.complexity}}{% endraw %}
 Previous comments: {% raw %}{{task.comments}}{% endraw %}
 
 When done, call {% raw %}{{callback.url}}{% endraw %} with taskId={% raw %}{{task.id}}{% endraw %} and status=review. If you have questions, call with status=blocked and include your question.'`;
+
+async function fetchModels() {
+    const helpText = document.getElementById('model-help');
+    const modelSelect = document.getElementById('user-model');
+    
+    helpText.textContent = 'Loading models...';
+    
+    try {
+        const res = await fetch('/api/models');
+        const models = await res.json();
+        
+        modelSelect.innerHTML = '<option value="">Select model...</option>';
+        models.forEach(m => {
+            const option = document.createElement('option');
+            option.value = m.id;
+            option.textContent = m.id;
+            modelSelect.appendChild(option);
+        });
+        
+        helpText.textContent = `Loaded ${models.length} models`;
+    } catch (err) {
+        helpText.textContent = 'Error loading models: ' + err.message;
+    }
+}
 
 function toggleAI(type) {
     document.getElementById('ai-fields').style.display = type === 'ai' ? 'block' : 'none';
@@ -117,9 +137,7 @@ async function showEditUser(userId) {
     toggleAI(u.type || 'human');
 
     if (u.type === 'ai') {
-        document.getElementById('user-provider').value = u.provider || '';
         document.getElementById('user-model').value = u.model || '';
-        document.getElementById('user-api-key').value = '';
         document.getElementById('user-system-prompt').value = u.system_prompt || '';
         document.getElementById('user-execute-command').value = u.execute_command || DEFAULT_EXECUTE_CMD;
     }
