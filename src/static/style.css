@@ -437,3 +437,65 @@ textarea { resize: vertical; min-height: 60px; }
     .nav-link { font-size: 0.8em; padding: 4px 8px; }
     .main-content { padding: 16px; }
 }
+
+/* ── Ideas extra ────────────────────────────────────── */
+.idea-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.idea-card-header h3 { margin: 0; }
+.idea-desc { color: var(--text2); font-size: 0.9em; margin-bottom: 10px; }
+.idea-architect { font-size: 0.82em; color: var(--text2); margin-bottom: 10px; }
+.idea-questions {
+    background: var(--bg);
+    border: 1px solid var(--orange);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin-bottom: 12px;
+}
+.questions-label { font-size: 0.85em; font-weight: 600; color: var(--orange); margin-bottom: 8px; }
+.question-item { margin-bottom: 10px; }
+.question-text { font-size: 0.85em; margin-bottom: 4px; }
+.question-answer {
+    width: 100%;
+    min-height: 40px;
+    font-size: 0.82em;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    padding: 6px 8px;
+    resize: vertical;
+}
+
+/* ── Index extra ────────────────────────────────────── */
+.project-card-hint {
+    display: block;
+    font-size: 0.75em;
+    color: var(--accent);
+    margin-top: 8px;
+}
+.empty-hint { margin-top: 8px; font-size: 0.95em; }
+
+/* ── Info box ────────────────────────────────────────── */
+.info-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin: 8px 0;
+    font-size: 0.85em;
+}
+.info-box ul { margin: 6px 0 6px 16px; }
+.info-box li { margin-bottom: 3px; }
+.info-box p { margin-top: 6px; }
+.info-box a { color: var(--accent); }
+
+/* ── Settings h3 spacing ────────────────────────────── */
+.settings-form h3:first-child { margin-top: 0; }
+
+/* ── Status badges extra ────────────────────────────── */
+.status-archived { background: var(--bg3); color: var(--text2); }

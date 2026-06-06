@@ -23,6 +23,10 @@
             <button class="btn btn-sm btn-danger" onclick="deleteUser({{ u.id }})">Delete</button>
         </div>
     </div>
+    {% else %}
+    <div class="empty-state">
+        <p>No users yet. Create a human or AI user to get started.</p>
+    </div>
     {% endfor %}
 </div>
 
@@ -36,7 +40,7 @@
             <label>Name</label>
             <input type="text" name="name" id="user-name" required>
             <label>Role</label>
-            <input type="text" name="role" id="user-role" placeholder="e.g. Senior Dev, Architect">
+            <input type="text" name="role" id="user-role" placeholder="e.g. Senior Dev, Architect, Tester">
             <label>Type</label>
             <select name="type" id="user-type" onchange="toggleAI(this.value)">
                 <option value="human">Human</option>
@@ -55,9 +59,27 @@
                 <label>API Key</label>
                 <input type="password" name="api_key" id="user-api-key" placeholder="sk-...">
                 <label>System Prompt</label>
-                <textarea name="system_prompt" id="user-system-prompt" rows="4" placeholder="Personality and specialty..."></textarea>
+                <textarea name="system_prompt" id="user-system-prompt" rows="4" placeholder="Personality and specialty of this AI agent..."></textarea>
                 <label>Execute Command</label>
-                <textarea name="execute_command" id="user-execute-command" rows="3" placeholder="e.g. opencode run --prompt '{{task.description}}'">opencode run --prompt 'Task: {{task.title}}
+                <textarea name="execute_command" id="user-execute-command" rows="4" id="exec-cmd-field"></textarea>
+                <p class="help-text">
+                    Available variables:
+                    <code>&#123;&#123;task.id&#125;&#125;</code>
+                    <code>&#123;&#123;task.title&#125;&#125;</code>
+                    <code>&#123;&#123;task.description&#125;&#125;</code>
+                    <code>&#123;&#123;task.complexity&#125;&#125;</code>
+                    <code>&#123;&#123;task.comments&#125;&#125;</code>
+                    <code>&#123;&#123;project.name&#125;&#125;</code>
+                    <code>&#123;&#123;callback.url&#125;&#125;</code>
+                </p>
+            </div>
+            <button type="submit" class="btn btn-primary" style="margin-top:16px">Save</button>
+        </form>
+    </div>
+</div>
+
+<script>
+const DEFAULT_EXECUTE_CMD = `opencode run --prompt 'Task: {{task.title}}
 
 Description: {{task.description}}
 
@@ -65,15 +87,8 @@ Complexity: {{task.complexity}}
 
 Previous comments: {{task.comments}}
 
-When done, call {{callback.url}} with taskId={{task.id}} and status=review. If you have questions, call with status=blocked.'</textarea>
-                <p class="help-text">Available variables: <code>{% raw %}{{task.id}}, {{task.title}}, {{task.description}}, {{task.complexity}}, {{task.comments}}, {{project.name}}, {{callback.url}}{% endraw %}</code></p>
-            </div>
-            <button type="submit" class="btn btn-primary">Save</button>
-        </form>
-    </div>
-</div>
+When done, call {{callback.url}} with taskId={{task.id}} and status=review. If you have questions, call with status=blocked and include your question.'`;
 
-<script>
 function toggleAI(type) {
     document.getElementById('ai-fields').style.display = type === 'ai' ? 'block' : 'none';
 }
@@ -82,6 +97,7 @@ function showCreateUser() {
     document.getElementById('user-modal-title').textContent = 'New User';
     document.getElementById('user-id').value = '';
     document.getElementById('user-form').reset();
+    document.getElementById('user-execute-command').value = DEFAULT_EXECUTE_CMD;
     document.getElementById('user-modal').style.display = 'flex';
     toggleAI('human');
 }
@@ -105,7 +121,7 @@ async function showEditUser(userId) {
         document.getElementById('user-model').value = u.model || '';
         document.getElementById('user-api-key').value = '';
         document.getElementById('user-system-prompt').value = u.system_prompt || '';
-        document.getElementById('user-execute-command').value = u.execute_command || 'opencode run --prompt \'Task: {{task.title}}\n\nDescription: {{task.description}}\n\nComplexity: {{task.complexity}}\n\nPrevious comments: {{task.comments}}\n\nWhen done, call {{callback.url}} with taskId={{task.id}} and status=review. If you have questions, call with status=blocked.\'';
+        document.getElementById('user-execute-command').value = u.execute_command || DEFAULT_EXECUTE_CMD;
     }
 
     document.getElementById('user-modal').style.display = 'flex';
@@ -122,6 +138,10 @@ async function saveUser(e) {
 
     const res = await fetch(url, { method, body: fd });
     if (res.ok) { closeModal('user-modal'); window.location.reload(); }
+    else {
+        const err = await res.json();
+        alert('Error: ' + (err.detail || JSON.stringify(err)));
+    }
     return false;
 }
 

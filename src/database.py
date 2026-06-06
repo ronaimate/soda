@@ -67,6 +67,7 @@ class Idea(Base):
     status: Mapped[str] = mapped_column(
         String(20), default="active"
     )  # active, generating, generated, archived
+    pending_questions: Mapped[Optional[str]] = mapped_column(Text)  # JSON array of pending questions
     created_by: Mapped[Optional[str]] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -158,7 +159,10 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with async_session() as session:
-        for key, default in [("callback_url", "http://localhost:8000/api/callback")]:
+        for key, default in [
+            ("callback_url", "http://localhost:8000/api/callback"),
+            ("opencode_api_key", ""),
+        ]:
             existing = await session.execute(
                 sa_select(GlobalSetting).where(GlobalSetting.key == key)
             )

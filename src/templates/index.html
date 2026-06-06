@@ -2,7 +2,6 @@
 {% block content %}
 <div class="page-header">
     <h1>Projects</h1>
-    <button class="btn btn-primary" onclick="showCreateProject()">+ New Project</button>
 </div>
 
 <div class="project-list">
@@ -10,51 +9,13 @@
     <a href="/project/{{ p.id }}" class="project-card">
         <h3>{{ p.name }}</h3>
         {% if p.description %}<p>{{ p.description }}</p>{% endif %}
+        <span class="project-card-hint">Click to open board →</span>
     </a>
     {% else %}
     <div class="empty-state">
-        <p>No projects yet. Create one to get started!</p>
+        <p>No projects yet.</p>
+        <p class="empty-hint">Go to <a href="/ideas">Ideas</a> to create your first project.</p>
     </div>
     {% endfor %}
 </div>
-
-<div id="create-project-modal" class="modal" style="display:none">
-    <div class="modal-content">
-        <span class="modal-close" onclick="closeModal('create-project-modal')">&times;</span>
-        <h2>New Project</h2>
-        <form onsubmit="return createProject(event)">
-            <label>Name</label>
-            <input type="text" name="name" required>
-            <label>Description</label>
-            <textarea name="description"></textarea>
-            <button type="submit" class="btn btn-primary">Create</button>
-        </form>
-    </div>
-</div>
-
-<script>
-async function createProject(e) {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const res = await fetch('/api/projects', { method: 'POST', body: fd });
-    const data = await res.json();
-    if (data.id) window.location = '/project/' + data.id;
-    return false;
-}
-
-function showCreateProject() {
-    document.getElementById('create-project-modal').style.display = 'flex';
-}
-
-function closeModal(id) {
-    document.getElementById(id).style.display = 'none';
-}
-
-// Close modals on overlay click
-document.querySelectorAll('.modal').forEach(m => {
-    m.addEventListener('click', e => {
-        if (e.target === m) m.style.display = 'none';
-    });
-});
-</script>
 {% endblock %}

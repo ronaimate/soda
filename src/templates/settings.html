@@ -6,52 +6,59 @@
 
 <div class="settings-form">
     <form onsubmit="return saveSettings(event)">
-        <h3>Callback</h3>
+
+        <h3>🤖 OpenCode / CLI Integration</h3>
+        <label>OpenCode API Key</label>
+        <input type="password" name="opencode_api_key" value="{{ settings.get('opencode_api_key', '') }}" placeholder="sk-... or openrouter key" class="input-mono" autocomplete="off">
+        <p class="help-text">This key is injected as <code>OPENCODE_API_KEY</code> environment variable when running execute commands. Used by OpenCode CLI or any agentic tool that reads this env var.</p>
+
+        <h3>📡 Callback</h3>
         <label>Callback URL</label>
         <input type="text" name="callback_url" value="{{ settings.get('callback_url', 'http://localhost:8000/api/callback') }}" class="input-mono">
-        <p class="help-text">This URL is called by the execute command to report task status. Available in templates as <code>{% raw %}{{callback.url}}{% endraw %}</code>.</p>
+        <p class="help-text">This URL is called by the execute command to report task status. Available in execute command templates as <code>&#123;&#123;callback.url&#125;&#125;</code>.</p>
 
         <h3>🔧 Git Integration</h3>
         <p class="help-text">Configure GitHub credentials to enable "Commit & Push" for tasks in the Done column.</p>
-        
+
         <label>GitHub Username</label>
-        <input type="text" name="git_username" value="{{ settings.get('git_username', '') }}" placeholder="your-username" class="input-mono">
-        
+        <input type="text" name="git_username" value="{{ settings.get('git_username', '') }}" placeholder="your-github-username" class="input-mono">
+
         <label>GitHub Personal Access Token (PAT)</label>
         <input type="password" name="git_token" value="{{ settings.get('git_token', '') }}" placeholder="ghp_xxxx..." class="input-mono">
         <div class="info-box">
             <strong>Required Permissions:</strong>
             <ul>
-                <li><strong>Classic PAT:</strong> <code>repo</code> scope (full control of private repositories)</li>
-                <li><strong>Fine-grained PAT:</strong> <code>Contents: Read and write</code> + <code>Metadata: Read</code> for target repos</li>
+                <li><strong>Classic PAT:</strong> <code>repo</code> scope</li>
+                <li><strong>Fine-grained PAT:</strong> <code>Contents: Read and write</code> + <code>Metadata: Read</code></li>
             </ul>
-            <p>Create a token at: <a href="https://github.com/settings/tokens" target="_blank">github.com/settings/tokens</a></p>
+            <p>Create at: <a href="https://github.com/settings/tokens" target="_blank">github.com/settings/tokens</a></p>
         </div>
-        
+
         <label>Default Repository</label>
         <input type="text" name="git_default_repo" value="{{ settings.get('git_default_repo', '') }}" placeholder="my-project" class="input-mono">
         <p class="help-text">Default repo name (without owner). Will be auto-created if it doesn't exist.</p>
-        
+
         <label>Default Branch</label>
         <input type="text" name="git_default_branch" value="{{ settings.get('git_default_branch', 'main') }}" placeholder="main" class="input-mono">
 
-        <h3>Task Lifecycle</h3>
+        <h3>📋 Task Lifecycle</h3>
         <div class="lifecycle-diagram">
+            <div class="lifecycle-step">💡 Idea</div>
+            <div class="lifecycle-arrow">→</div>
             <div class="lifecycle-step">📋 Backlog</div>
             <div class="lifecycle-arrow">→</div>
             <div class="lifecycle-step">▶️ Running</div>
-            <div class="lifecycle-arrow">→</div>
+            <div class="lifecycle-arrow">⇄</div>
             <div class="lifecycle-step lifecycle-pause">🚫 Blocked</div>
-            <div class="lifecycle-arrow">↩</div>
-            <div class="lifecycle-step">▶️ Running</div>
             <div class="lifecycle-arrow">→</div>
             <div class="lifecycle-step">👁️ Review</div>
             <div class="lifecycle-arrow">→</div>
             <div class="lifecycle-step">✅ Done</div>
         </div>
-        <p class="help-text">Drag tasks between columns to trigger lifecycle transitions.</p>
+        <p class="help-text">Drag tasks between columns. Moving to Running triggers the assignee AI's execute command.</p>
 
-        <button type="submit" class="btn btn-primary">Save Settings</button>
+        <button type="submit" class="btn btn-primary" style="margin-top:24px">Save Settings</button>
+        <span id="save-indicator" style="display:none; margin-left:12px; color:var(--green)">✓ Saved</span>
     </form>
 </div>
 
@@ -60,7 +67,13 @@ async function saveSettings(e) {
     e.preventDefault();
     const fd = new FormData(e.target);
     const res = await fetch('/api/settings', { method: 'PATCH', body: fd });
-    if (res.ok) { alert('Settings saved!'); window.location.reload(); }
+    if (res.ok) {
+        const ind = document.getElementById('save-indicator');
+        ind.style.display = 'inline';
+        setTimeout(() => ind.style.display = 'none', 2000);
+    } else {
+        alert('Failed to save settings');
+    }
     return false;
 }
 </script>

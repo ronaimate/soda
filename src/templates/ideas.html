@@ -1,26 +1,53 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="page-header">
-    <h1>📝 Ideas</h1>
-    <button class="btn btn-primary" onclick="showCreateIdea()">+ New Idea</button>
+    <div class="header-with-actions">
+        <h1>💡 Ideas</h1>
+        <button class="btn btn-primary" onclick="showCreateIdea()">+ New Idea</button>
+    </div>
 </div>
 
 <div class="idea-grid">
     {% for idea in ideas %}
     <div class="idea-card" data-idea-id="{{ idea.id }}">
-        <h3>{{ idea.title }}</h3>
-        {% if idea.description %}<p>{{ idea.description[:200] }}{% if idea.description|length > 200 %}...{% endif %}</p>{% endif %}
-        <div class="idea-meta">
-            {% if idea.architect_user_id %}
-                {% set arch = ai_users|selectattr('id', 'equalto', idea.architect_user_id)|first %}
-                {% if arch %}<span class="badge">Architect: {{ arch.name }}</span>{% endif %}
-            {% endif %}
+        <div class="idea-card-header">
+            <h3>{{ idea.title }}</h3>
             <span class="badge status-{{ idea.status }}">{{ idea.status }}</span>
         </div>
+        {% if idea.description %}<p class="idea-desc">{{ idea.description[:200] }}{% if idea.description|length > 200 %}...{% endif %}</p>{% endif %}
+
+        {% if idea.architect_user_id %}
+            {% set arch = ai_users|selectattr('id', 'equalto', idea.architect_user_id)|first %}
+            {% if arch %}<div class="idea-architect">Architect: <strong>{{ arch.name }}</strong></div>{% endif %}
+        {% endif %}
+
+        {% if idea.questions %}
+        <div class="idea-questions">
+            <p class="questions-label">❓ Architect has questions:</p>
+            {% for q in idea.questions %}
+            <div class="question-item">
+                <p class="question-text">{{ q }}</p>
+                <textarea class="question-answer" data-question="{{ loop.index0 }}" placeholder="Your answer..."></textarea>
+            </div>
+            {% endfor %}
+            <button class="btn btn-sm btn-primary" onclick="submitAnswers({{ idea.id }})">Send Answers & Continue</button>
+        </div>
+        {% endif %}
+
         <div class="idea-actions">
-            {% if idea.status == 'active' and idea.architect_user_id %}
-            <button class="btn btn-sm btn-primary" onclick="generateProject({{ idea.id }})">🚀 Generate Project</button>
+            {% if idea.status == 'active' %}
+                {% if idea.architect_user_id %}
+                <button class="btn btn-sm btn-primary" onclick="generateProject({{ idea.id }})">🚀 Generate Project</button>
+                {% else %}
+                <span class="help-text">Set an Architect AI to generate</span>
+                {% endif %}
+            {% elif idea.status == 'generating' %}
+                <span class="badge">⏳ Generating...</span>
+            {% elif idea.status == 'generated' %}
+                <span class="badge status-generated">✅ Project created</span>
             {% endif %}
+            <button class="btn btn-sm" onclick="showEditIdea({{ idea.id }}, '{{ idea.title|e }}', '{{ (idea.description or '')|e }}', '{{ (idea.system_prompt or '')|e }}', {{ idea.architect_user_id or 'null' }})">Edit</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteIdea({{ idea.id }})">Delete</button>
         </div>
     </div>
     {% else %}
@@ -35,52 +62,181 @@
     <div class="modal-content">
         <span class="modal-close" onclick="closeModal('create-idea-modal')">&times;</span>
         <h2>New Idea</h2>
-        <form onsubmit="return createIdea(event)">
+        <div>
             <label>Title</label>
-            <input type="text" name="title" required>
+            <input type="text" id="idea-title" required placeholder="e.g. Recipe book app">
             <label>Description</label>
-            <textarea name="description" rows="4"></textarea>
-            <label>System Prompt (for Architect)</label>
-            <textarea name="system_prompt" rows="3" placeholder="Optional: instructions for the Architect AI"></textarea>
+            <textarea id="idea-desc" rows="4" placeholder="Describe your idea in detail..."></textarea>
+            <label>System Prompt for Architect AI</label>
+            <textarea id="idea-system-prompt" rows="3" placeholder="Optional: extra instructions for the Architect when generating tasks..."></textarea>
             <label>Architect AI</label>
-            <select name="architect_user_id">
-                <option value="">Select...</option>
+            <select id="idea-architect">
+                <option value="">Select Architect AI...</option>
                 {% for u in ai_users %}
-                <option value="{{ u.id }}">{{ u.name }} ({{ u.provider or '?' }})</option>
+                <option value="{{ u.id }}">{{ u.name }} {% if u.model %}({{ u.model }}){% endif %}</option>
                 {% endfor %}
             </select>
-            <button type="submit" class="btn btn-primary">Create</button>
-        </form>
+            {% if not ai_users %}
+            <p class="help-text">⚠️ No AI users yet. <a href="/users">Create an AI user</a> first.</p>
+            {% endif %}
+            <button class="btn btn-primary" onclick="createIdea()" style="margin-top:16px">Create Idea</button>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Idea Modal -->
+<div id="edit-idea-modal" class="modal" style="display:none">
+    <div class="modal-content">
+        <span class="modal-close" onclick="closeModal('edit-idea-modal')">&times;</span>
+        <h2>Edit Idea</h2>
+        <div>
+            <input type="hidden" id="edit-idea-id">
+            <label>Title</label>
+            <input type="text" id="edit-idea-title" required>
+            <label>Description</label>
+            <textarea id="edit-idea-desc" rows="4"></textarea>
+            <label>System Prompt for Architect AI</label>
+            <textarea id="edit-idea-system-prompt" rows="3"></textarea>
+            <label>Architect AI</label>
+            <select id="edit-idea-architect">
+                <option value="">Select Architect AI...</option>
+                {% for u in ai_users %}
+                <option value="{{ u.id }}">{{ u.name }} {% if u.model %}({{ u.model }}){% endif %}</option>
+                {% endfor %}
+            </select>
+            <button class="btn btn-primary" onclick="updateIdea()" style="margin-top:16px">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Generate status overlay -->
+<div id="generate-overlay" style="display:none; position:fixed; top:0;left:0;right:0;bottom:0; background:rgba(0,0,0,0.7); z-index:2000; align-items:center; justify-content:center; flex-direction:column; gap:16px;">
+    <div style="background:var(--bg2); padding:32px; border-radius:var(--radius); text-align:center; max-width:400px;">
+        <div style="font-size:2em; margin-bottom:12px;">🤖</div>
+        <p id="generate-status-text">Architect is thinking...</p>
+        <p class="help-text" style="margin-top:8px">This may take a minute</p>
     </div>
 </div>
 
 <script>
-async function createIdea(e) {
-    e.preventDefault();
-    const fd = new FormData(e.target);
+async function createIdea() {
+    const title = document.getElementById('idea-title').value.trim();
+    if (!title) { alert('Title is required'); return; }
+
+    const fd = new FormData();
+    fd.append('title', title);
+    fd.append('description', document.getElementById('idea-desc').value);
+    fd.append('system_prompt', document.getElementById('idea-system-prompt').value);
+    const archId = document.getElementById('idea-architect').value;
+    if (archId) fd.append('architect_user_id', archId);
+
     const res = await fetch('/api/ideas', { method: 'POST', body: fd });
-    if (res.ok) { closeModal('create-idea-modal'); window.location.reload(); }
-    return false;
+    if (res.ok) {
+        closeModal('create-idea-modal');
+        window.location.reload();
+    } else {
+        const err = await res.json();
+        alert('Error: ' + (err.detail || JSON.stringify(err)));
+    }
+}
+
+function showCreateIdea() {
+    document.getElementById('idea-title').value = '';
+    document.getElementById('idea-desc').value = '';
+    document.getElementById('idea-system-prompt').value = '';
+    document.getElementById('idea-architect').value = '';
+    document.getElementById('create-idea-modal').style.display = 'flex';
+}
+
+function showEditIdea(id, title, desc, sysPrompt, architectId) {
+    document.getElementById('edit-idea-id').value = id;
+    document.getElementById('edit-idea-title').value = title;
+    document.getElementById('edit-idea-desc').value = desc;
+    document.getElementById('edit-idea-system-prompt').value = sysPrompt;
+    if (architectId) document.getElementById('edit-idea-architect').value = architectId;
+    document.getElementById('edit-idea-modal').style.display = 'flex';
+}
+
+async function updateIdea() {
+    const id = document.getElementById('edit-idea-id').value;
+    const fd = new FormData();
+    fd.append('title', document.getElementById('edit-idea-title').value);
+    fd.append('description', document.getElementById('edit-idea-desc').value);
+    fd.append('system_prompt', document.getElementById('edit-idea-system-prompt').value);
+    const archId = document.getElementById('edit-idea-architect').value;
+    if (archId) fd.append('architect_user_id', archId);
+
+    const res = await fetch(`/api/ideas/${id}`, { method: 'PATCH', body: fd });
+    if (res.ok) { closeModal('edit-idea-modal'); window.location.reload(); }
+    else {
+        const err = await res.json();
+        alert('Error: ' + (err.detail || JSON.stringify(err)));
+    }
+}
+
+async function deleteIdea(ideaId) {
+    if (!confirm('Delete this idea?')) return;
+    const res = await fetch(`/api/ideas/${ideaId}`, { method: 'DELETE' });
+    if (res.ok) window.location.reload();
 }
 
 async function generateProject(ideaId) {
-    const btn = document.querySelector(`[data-idea-id="${ideaId}"] .btn`);
-    btn.disabled = true;
-    btn.textContent = '⏳ Generating...';
+    const overlay = document.getElementById('generate-overlay');
+    overlay.style.display = 'flex';
+    document.getElementById('generate-status-text').textContent = 'Architect is analyzing your idea...';
 
-    const res = await fetch(`/api/ideas/${ideaId}/generate`, { method: 'POST' });
-    const data = await res.json();
+    try {
+        const res = await fetch(`/api/ideas/${ideaId}/generate`, { method: 'POST' });
+        const data = await res.json();
+        overlay.style.display = 'none';
 
-    if (data.status === 'generated') {
-        alert(`Project "${data.project_name}" created with ${data.tasks_count} tasks!`);
-        window.location = `/project/${data.project_id}`;
-    } else if (data.status === 'questions') {
-        alert('The Architect has questions. Check the idea for details.');
-        window.location.reload();
-    } else {
-        alert('Generation failed. Check the architect configuration.');
-        btn.disabled = false;
-        btn.textContent = '🚀 Generate Project';
+        if (data.status === 'generated') {
+            alert(`✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`);
+            window.location = `/project/${data.project_id}`;
+        } else if (data.status === 'questions') {
+            // Reload to show questions on the card
+            window.location.reload();
+        } else {
+            alert('Generation failed. Check the architect configuration.');
+        }
+    } catch (err) {
+        overlay.style.display = 'none';
+        alert('Error: ' + err.message);
+    }
+}
+
+async function submitAnswers(ideaId) {
+    const card = document.querySelector(`[data-idea-id="${ideaId}"]`);
+    const answers = [...card.querySelectorAll('.question-answer')].map(ta => ta.value.trim());
+
+    if (answers.some(a => !a)) {
+        alert('Please answer all questions before continuing.');
+        return;
+    }
+
+    const fd = new FormData();
+    fd.append('answers', JSON.stringify(answers));
+
+    const overlay = document.getElementById('generate-overlay');
+    overlay.style.display = 'flex';
+    document.getElementById('generate-status-text').textContent = 'Processing your answers...';
+
+    try {
+        const res = await fetch(`/api/ideas/${ideaId}/answer`, { method: 'POST', body: fd });
+        const data = await res.json();
+        overlay.style.display = 'none';
+
+        if (data.status === 'generated') {
+            alert(`✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`);
+            window.location = `/project/${data.project_id}`;
+        } else if (data.status === 'questions') {
+            window.location.reload();
+        } else {
+            alert('Something went wrong. Try again.');
+        }
+    } catch (err) {
+        overlay.style.display = 'none';
+        alert('Error: ' + err.message);
     }
 }
 

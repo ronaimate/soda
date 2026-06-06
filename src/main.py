@@ -90,6 +90,17 @@ def create_app() -> FastAPI:
         with open(OPENCODE_AUTH, "w") as f:
             json.dump(auth_data, f)
 
+    # ── Helper: get OpenCode API key from settings ─────────────────
+
+    async def _get_opencode_api_key() -> str:
+        """Get OpenCode API key from global settings."""
+        async with async_session() as session:
+            result = await session.execute(
+                sa_select(GlobalSetting).where(GlobalSetting.key == "opencode_api_key")
+            )
+            setting = result.scalar_one_or_none()
+            return (setting.value or "").strip() if setting else ""
+
     # ── Helper: run execute command ─────────────────────────────────
 
     async def _run_execute_command(task: Task, assignee: User) -> None:
@@ -99,6 +110,9 @@ def create_app() -> FastAPI:
 
         # Write AI user's auth to OpenCode config
         _write_opencode_auth(assignee)
+
+        # Get OpenCode API key from settings
+        opencode_api_key = await _get_opencode_api_key()
 
         # Build comments JSON
         async with async_session() as session:
@@ -110,7 +124,7 @@ def create_app() -> FastAPI:
                 for c in result.scalars().all()
             ]
 
-        # Get callback URL from settings
+        # Get callback URL and project name from settings
         async with async_session() as session:
             result = await session.execute(
                 sa_select(GlobalSetting).where(GlobalSetting.key == "callback_url")
@@ -118,7 +132,6 @@ def create_app() -> FastAPI:
             setting = result.scalar_one_or_none()
             callback_url = setting.value if setting else "http://localhost:8000/api/callback"
 
-        # Get project name
         async with async_session() as session:
             project = await session.get(Project, task.project_id)
             project_name = project.name if project else ""
@@ -133,12 +146,18 @@ def create_app() -> FastAPI:
         cmd = cmd.replace("{{project.name}}", project_name)
         cmd = cmd.replace("{{callback.url}}", callback_url)
 
+        # Build environment with OpenCode API key injected
+        env = os.environ.copy()
+        if opencode_api_key:
+            env["OPENCODE_API_KEY"] = opencode_api_key
+
         # Run the command
         proc = await asyncio.create_subprocess_shell(
             cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=os.path.expanduser("~"),
+            env=env,
         )
         running_processes[task.id] = proc
 
@@ -157,15 +176,32 @@ def create_app() -> FastAPI:
     async def ideas_page(request: Request):
         async with async_session() as session:
             result = await session.execute(
-                sa_select(Idea).where(Idea.status.in_(["active", "generating"])).order_by(Idea.created_at.desc())
+                sa_select(Idea).order_by(Idea.created_at.desc())
             )
-            ideas = result.scalars().all()
+            ideas_raw = result.scalars().all()
             result = await session.execute(
                 sa_select(User).where(User.type == "ai").order_by(User.name)
             )
             ai_users = result.scalars().all()
             result = await session.execute(sa_select(Project).order_by(Project.name))
             projects = result.scalars().all()
+
+        # Parse pending_questions for each idea
+        ideas = []
+        for i in ideas_raw:
+            questions = []
+            if i.pending_questions:
+                try:
+                    questions = json.loads(i.pending_questions)
+                except Exception:
+                    questions = []
+            from types import SimpleNamespace
+            iv = SimpleNamespace()
+            for attr in ["id", "title", "description", "system_prompt", "architect_user_id", "status"]:
+                setattr(iv, attr, getattr(i, attr))
+            iv.questions = questions
+            ideas.append(iv)
+
         return templates.TemplateResponse(
             "ideas.html",
             {"request": request, "ideas": ideas, "ai_users": ai_users, "projects": projects},
@@ -463,26 +499,32 @@ def create_app() -> FastAPI:
 
     # ── API: Ideas ─────────────────────────────────────────────────
 
+    def _idea_to_dict(i: "Idea") -> dict:
+        questions = []
+        if i.pending_questions:
+            import json as _json
+            try:
+                questions = _json.loads(i.pending_questions)
+            except Exception:
+                questions = []
+        return {
+            "id": i.id,
+            "title": i.title,
+            "description": i.description,
+            "system_prompt": i.system_prompt,
+            "architect_user_id": i.architect_user_id,
+            "status": i.status,
+            "questions": questions,
+            "created_at": str(i.created_at),
+        }
+
     @app.get("/api/ideas")
     async def list_ideas():
         async with async_session() as session:
             result = await session.execute(
                 sa_select(Idea).order_by(Idea.created_at.desc())
             )
-            ideas = result.scalars().all()
-            return [
-                {
-                    "id": i.id,
-                    "title": i.title,
-                    "description": i.description,
-                    "system_prompt": i.system_prompt,
-                    "architect_user_id": i.architect_user_id,
-                    "status": i.status,
-                    "created_by": i.created_by,
-                    "created_at": str(i.created_at),
-                }
-                for i in ideas
-            ]
+            return [_idea_to_dict(i) for i in result.scalars().all()]
 
     @app.post("/api/ideas")
     async def create_idea(
@@ -504,6 +546,97 @@ def create_app() -> FastAPI:
             await session.refresh(idea)
             return {"id": idea.id, "title": idea.title, "status": idea.status}
 
+    @app.patch("/api/ideas/{idea_id}")
+    async def update_idea(
+        idea_id: int,
+        title: Optional[str] = Form(None),
+        description: Optional[str] = Form(None),
+        system_prompt: Optional[str] = Form(None),
+        architect_user_id: Optional[int] = Form(None),
+    ):
+        async with async_session() as session:
+            idea = await session.get(Idea, idea_id)
+            if not idea:
+                raise HTTPException(404, "Idea not found")
+            if title:
+                idea.title = title
+            if description is not None:
+                idea.description = description
+            if system_prompt is not None:
+                idea.system_prompt = system_prompt
+            if architect_user_id is not None:
+                idea.architect_user_id = architect_user_id if architect_user_id > 0 else None
+            await session.commit()
+            return {"ok": True}
+
+    @app.delete("/api/ideas/{idea_id}")
+    async def delete_idea(idea_id: int):
+        async with async_session() as session:
+            idea = await session.get(Idea, idea_id)
+            if not idea:
+                raise HTTPException(404, "Idea not found")
+            await session.delete(idea)
+            await session.commit()
+            return {"ok": True}
+
+    async def _call_architect(architect: "User", prompt: str) -> dict:
+        """Call the architect AI via OpenCode and return parsed JSON result."""
+        _write_opencode_auth(architect)
+        opencode_api_key = await _get_opencode_api_key()
+        env = os.environ.copy()
+        if opencode_api_key:
+            env["OPENCODE_API_KEY"] = opencode_api_key
+
+        proc = await asyncio.create_subprocess_shell(
+            f'opencode run --prompt {json.dumps(prompt)}',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+        output = stdout.decode().strip()
+        json_match = re.search(r'\{[\s\S]*\}', output)
+        if not json_match:
+            raise HTTPException(500, f"Architect did not return valid JSON. Output: {output[:200]}")
+        try:
+            return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            raise HTTPException(500, "Failed to parse architect JSON response")
+
+    async def _create_project_from_result(idea: "Idea", result: dict) -> dict:
+        """Create project and tasks from architect generate response."""
+        async with async_session() as session:
+            project = Project(
+                name=result.get("project_name", idea.title),
+                description=result.get("project_description", idea.description),
+            )
+            session.add(project)
+            await session.commit()
+            await session.refresh(project)
+
+            for i, t in enumerate(result.get("tasks", [])):
+                task = Task(
+                    project_id=project.id,
+                    title=t.get("title", "Untitled"),
+                    description=t.get("description", ""),
+                    complexity=t.get("complexity"),
+                    board_column="backlog",
+                    position=i,
+                )
+                session.add(task)
+
+            idea_obj = await session.get(Idea, idea.id)
+            idea_obj.status = "generated"
+            idea_obj.pending_questions = None
+            await session.commit()
+
+        return {
+            "status": "generated",
+            "project_id": project.id,
+            "project_name": project.name,
+            "tasks_count": len(result.get("tasks", [])),
+        }
+
     @app.post("/api/ideas/{idea_id}/generate")
     async def generate_from_idea(idea_id: int):
         """Start generating a project from an idea using the architect AI."""
@@ -516,121 +649,160 @@ def create_app() -> FastAPI:
             architect = await session.get(User, idea.architect_user_id)
             if not architect or architect.type != "ai":
                 raise HTTPException(400, "Architect must be an AI user")
-
             idea.status = "generating"
             await session.commit()
 
-        # Build prompt for the architect
         sys_prompt = architect.system_prompt or ""
         if idea.system_prompt:
             sys_prompt += "\n\n" + idea.system_prompt
 
-        task_prompt = f"""You are an Architect AI. Your job is to generate a project from this idea:
+        prompt = f"""You are an Architect AI. Generate a project plan from this idea.
 
 Title: {idea.title}
 Description: {idea.description}
 
 {sys_prompt}
 
-First, ask any clarifying questions you have. Return your response as JSON with one of these formats:
-
-If you have questions:
+If you need clarification before generating, return ONLY this JSON:
 {{
   "type": "questions",
   "questions": ["Question 1?", "Question 2?"]
 }}
 
-If you're ready to generate:
+If you are ready to generate, return ONLY this JSON:
 {{
   "type": "generate",
   "project_name": "...",
   "project_description": "...",
   "tasks": [
-    {{"title": "...", "description": "...", "complexity": "M"}}
+    {{"title": "...", "description": "...", "complexity": "S|M|L|XL"}}
   ]
-}}"""
+}}
 
-        # Write architect auth
-        _write_opencode_auth(architect)
-
-        # Run OpenCode
-        proc = await asyncio.create_subprocess_shell(
-            f'opencode run --prompt {json.dumps(task_prompt)}',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-
-        # Parse response
-        output = stdout.decode().strip()
-        # Try to find JSON in the output
-        json_match = re.search(r'\{[\s\S]*\}', output)
-        if not json_match:
-            async with async_session() as session:
-                idea = await session.get(Idea, idea_id)
-                idea.status = "active"
-                await session.commit()
-            raise HTTPException(500, "Architect did not return valid JSON")
+Return ONLY valid JSON, no other text."""
 
         try:
-            result = json.loads(json_match.group())
-        except json.JSONDecodeError:
+            result = await _call_architect(architect, prompt)
+        except Exception:
             async with async_session() as session:
-                idea = await session.get(Idea, idea_id)
-                idea.status = "active"
+                idea_obj = await session.get(Idea, idea_id)
+                idea_obj.status = "active"
                 await session.commit()
-            raise HTTPException(500, "Failed to parse architect response")
+            raise
 
         if result.get("type") == "questions":
-            # Save questions as comments on a temporary placeholder
+            questions = result.get("questions", [])
             async with async_session() as session:
-                idea = await session.get(Idea, idea_id)
-                idea.status = "active"
+                idea_obj = await session.get(Idea, idea_id)
+                idea_obj.status = "active"
+                idea_obj.pending_questions = json.dumps(questions)
                 await session.commit()
-            return {
-                "status": "questions",
-                "questions": result.get("questions", []),
-                "idea_id": idea_id,
-            }
+            return {"status": "questions", "questions": questions, "idea_id": idea_id}
 
         if result.get("type") == "generate":
             async with async_session() as session:
-                # Create project
-                project = Project(
-                    name=result.get("project_name", idea.title),
-                    description=result.get("project_description", idea.description),
-                )
-                session.add(project)
-                await session.commit()
-                await session.refresh(project)
-
-                # Create tasks
-                for i, t in enumerate(result.get("tasks", [])):
-                    task = Task(
-                        project_id=project.id,
-                        title=t.get("title", "Untitled"),
-                        description=t.get("description", ""),
-                        complexity=t.get("complexity"),
-                        column="backlog",
-                        position=i,
-                    )
-                    session.add(task)
-
-                idea.status = "generated"
-                await session.commit()
-
-            return {
-                "status": "generated",
-                "project_id": project.id,
-                "project_name": project.name,
-                "tasks_count": len(result.get("tasks", [])),
-            }
+                idea = await session.get(Idea, idea_id)
+            return await _create_project_from_result(idea, result)
 
         async with async_session() as session:
-            idea = await session.get(Idea, idea_id)
-            idea.status = "active"
+            idea_obj = await session.get(Idea, idea_id)
+            idea_obj.status = "active"
             await session.commit()
-        raise HTTPException(500, "Unexpected architect response")
+        raise HTTPException(500, "Unexpected architect response type")
+
+    @app.post("/api/ideas/{idea_id}/answer")
+    async def answer_idea_questions(idea_id: int, answers: str = Form(...)):
+        """Submit answers to architect questions and continue generation."""
+        async with async_session() as session:
+            idea = await session.get(Idea, idea_id)
+            if not idea:
+                raise HTTPException(404, "Idea not found")
+            if not idea.architect_user_id:
+                raise HTTPException(400, "No architect user selected")
+            architect = await session.get(User, idea.architect_user_id)
+            if not architect or architect.type != "ai":
+                raise HTTPException(400, "Architect must be an AI user")
+
+            pending_questions = []
+            if idea.pending_questions:
+                try:
+                    pending_questions = json.loads(idea.pending_questions)
+                except Exception:
+                    pending_questions = []
+
+            idea.status = "generating"
+            await session.commit()
+
+        try:
+            answers_list = json.loads(answers)
+        except json.JSONDecodeError:
+            raise HTTPException(400, "Invalid answers format")
+
+        sys_prompt = architect.system_prompt or ""
+        if idea.system_prompt:
+            sys_prompt += "\n\n" + idea.system_prompt
+
+        qa_pairs = "\n".join([
+            f"Q: {q}\nA: {a}"
+            for q, a in zip(pending_questions, answers_list)
+        ])
+
+        prompt = f"""You are an Architect AI. Generate a project plan from this idea.
+
+Title: {idea.title}
+Description: {idea.description}
+
+{sys_prompt}
+
+You previously asked questions and received these answers:
+{qa_pairs}
+
+Now generate the project. Return ONLY this JSON:
+{{
+  "type": "generate",
+  "project_name": "...",
+  "project_description": "...",
+  "tasks": [
+    {{"title": "...", "description": "...", "complexity": "S|M|L|XL"}}
+  ]
+}}
+
+If you still have questions, return:
+{{
+  "type": "questions",
+  "questions": ["Question?"]
+}}
+
+Return ONLY valid JSON, no other text."""
+
+        try:
+            result = await _call_architect(architect, prompt)
+        except Exception:
+            async with async_session() as session:
+                idea_obj = await session.get(Idea, idea_id)
+                idea_obj.status = "active"
+                await session.commit()
+            raise
+
+        if result.get("type") == "questions":
+            questions = result.get("questions", [])
+            async with async_session() as session:
+                idea_obj = await session.get(Idea, idea_id)
+                idea_obj.status = "active"
+                idea_obj.pending_questions = json.dumps(questions)
+                await session.commit()
+            return {"status": "questions", "questions": questions, "idea_id": idea_id}
+
+        if result.get("type") == "generate":
+            async with async_session() as session:
+                idea = await session.get(Idea, idea_id)
+            return await _create_project_from_result(idea, result)
+
+        async with async_session() as session:
+            idea_obj = await session.get(Idea, idea_id)
+            idea_obj.status = "active"
+            await session.commit()
+        raise HTTPException(500, "Unexpected architect response type")
 
     # ── API: Users ─────────────────────────────────────────────────
 
