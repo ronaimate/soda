@@ -79,15 +79,15 @@
 </div>
 
 <script>
-const DEFAULT_EXECUTE_CMD = `opencode run --prompt 'Task: {{task.title}}
+const DEFAULT_EXECUTE_CMD = `opencode run --prompt 'Task: {% raw %}{{task.title}}{% endraw %}
 
-Description: {{task.description}}
+Description: {% raw %}{{task.description}}{% endraw %}
 
-Complexity: {{task.complexity}}
+Complexity: {% raw %}{{task.complexity}}{% endraw %}
 
-Previous comments: {{task.comments}}
+Previous comments: {% raw %}{{task.comments}}{% endraw %}
 
-When done, call {{callback.url}} with taskId={{task.id}} and status=review. If you have questions, call with status=blocked and include your question.'`;
+When done, call {% raw %}{{callback.url}}{% endraw %} with taskId={% raw %}{{task.id}}{% endraw %} and status=review. If you have questions, call with status=blocked and include your question.'`;
 
 function toggleAI(type) {
     document.getElementById('ai-fields').style.display = type === 'ai' ? 'block' : 'none';
