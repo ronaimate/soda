@@ -581,27 +581,47 @@ def create_app() -> FastAPI:
 
     async def _call_architect(architect: "User", prompt: str) -> dict:
         """Call the architect AI via OpenCode and return parsed JSON result."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         _write_opencode_auth(architect)
         opencode_api_key = await _get_opencode_api_key()
         env = os.environ.copy()
         if opencode_api_key:
             env["OPENCODE_API_KEY"] = opencode_api_key
 
+        logger.info(f"Calling architect {architect.name} with prompt length: {len(prompt)}")
+        
         proc = await asyncio.create_subprocess_shell(
             f'opencode run --prompt {json.dumps(prompt)}',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
         output = stdout.decode().strip()
+        error_output = stderr.decode().strip()
+        
+        logger.info(f"Architect stdout length: {len(output)}")
+        logger.info(f"Architect stderr length: {len(error_output)}")
+        if error_output:
+            logger.error(f"Architect stderr: {error_output}")
+        
+        if proc.returncode != 0:
+            logger.error(f"Architect process failed with code {proc.returncode}")
+            raise HTTPException(500, f"Architect process failed (code {proc.returncode}): {error_output[:500]}")
+        
         json_match = re.search(r'\{[\s\S]*\}', output)
         if not json_match:
-            raise HTTPException(500, f"Architect did not return valid JSON. Output: {output[:200]}")
+            logger.error(f"No JSON found in architect output: {output[:500]}")
+            raise HTTPException(500, f"Architect did not return valid JSON. Stderr: {error_output[:200]}, Output: {output[:200]}")
         try:
-            return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            raise HTTPException(500, "Failed to parse architect JSON response")
+            result = json.loads(json_match.group())
+            logger.info(f"Successfully parsed architect response: {result.get('type')}")
+            return result
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse architect JSON: {str(e)}, Output: {output[:500]}")
+            raise HTTPException(500, f"Failed to parse architect JSON response: {str(e)}")
 
     async def _create_project_from_result(idea: "Idea", result: dict) -> dict:
         """Create project and tasks from architect generate response."""
@@ -638,17 +658,24 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/api/ideas/{idea_id}/generate")
-    async def generate_from_idea(idea_id: int):
+    async def generate_from_idea(idea_id: int, architect_user_id: int = Form(None)):
         """Start generating a project from an idea using the architect AI."""
         async with async_session() as session:
             idea = await session.get(Idea, idea_id)
             if not idea:
                 raise HTTPException(404, "Idea not found")
-            if not idea.architect_user_id:
+            
+            # Use provided architect_user_id or fall back to idea's architect
+            arch_id = architect_user_id or idea.architect_user_id
+            if not arch_id:
                 raise HTTPException(400, "No architect user selected")
-            architect = await session.get(User, idea.architect_user_id)
+            
+            architect = await session.get(User, arch_id)
             if not architect or architect.type != "ai":
                 raise HTTPException(400, "Architect must be an AI user")
+            
+            # Save the architect to the idea for future reference
+            idea.architect_user_id = arch_id
             idea.status = "generating"
             await session.commit()
 

@@ -15,7 +15,6 @@
         <div class="user-details">
             <div>Provider: <code>{{ u.provider or 'N/A' }}</code></div>
             <div>Model: <code>{{ u.model or 'N/A' }}</code></div>
-            <div>API Key: <code>{{ '••••' if u.api_key else 'Not set' }}</code></div>
         </div>
         {% endif %}
         <div class="user-actions">
@@ -56,8 +55,9 @@
                 </select>
                 <label>Model</label>
                 <input type="text" name="model" id="user-model" placeholder="e.g. claude-sonnet-4-20250514">
-                <label>API Key</label>
-                <input type="password" name="api_key" id="user-api-key" placeholder="sk-...">
+                <div class="help-text" style="margin-top:8px; padding:8px; background:var(--bg3); border-radius:4px">
+                    <strong>ℹ️ API Key:</strong> Configured globally in <a href="/settings">Settings</a>. All AI users share the same key.
+                </div>
                 <label>System Prompt</label>
                 <textarea name="system_prompt" id="user-system-prompt" rows="4" placeholder="Personality and specialty of this AI agent..."></textarea>
                 <label>Execute Command</label>

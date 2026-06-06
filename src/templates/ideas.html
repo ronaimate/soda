@@ -36,11 +36,7 @@
 
         <div class="idea-actions">
             {% if idea.status == 'active' %}
-                {% if idea.architect_user_id %}
-                <button class="btn btn-sm btn-primary" onclick="generateProject({{ idea.id }})">🚀 Generate Project</button>
-                {% else %}
-                <span class="help-text">Set an Architect AI to generate</span>
-                {% endif %}
+                <button class="btn btn-sm btn-primary" onclick="showArchitectSelect({{ idea.id }})">🚀 Generate Project</button>
             {% elif idea.status == 'generating' %}
                 <span class="badge">⏳ Generating...</span>
             {% elif idea.status == 'generated' %}
@@ -118,6 +114,27 @@
     </div>
 </div>
 
+<!-- Architect Select Modal -->
+<div id="architect-select-modal" class="modal" style="display:none">
+    <div class="modal-content">
+        <span class="modal-close" onclick="closeModal('architect-select-modal')">&times;</span>
+        <h2>Select Architect AI</h2>
+        <p class="help-text" style="margin-bottom:16px">Choose which AI user will generate the project from this idea.</p>
+        <input type="hidden" id="architect-select-idea-id">
+        <label>Architect AI</label>
+        <select id="architect-select-user">
+            <option value="">Select an AI user...</option>
+            {% for u in ai_users %}
+            <option value="{{ u.id }}">{{ u.name }} {% if u.model %}({{ u.model }}){% endif %}</option>
+            {% endfor %}
+        </select>
+        {% if not ai_users %}
+        <p class="help-text" style="margin-top:8px">⚠️ No AI users yet. <a href="/users">Create an AI user</a> first.</p>
+        {% endif %}
+        <button class="btn btn-primary" onclick="generateProject()" style="margin-top:16px">Generate Project</button>
+    </div>
+</div>
+
 <script>
 async function createIdea() {
     const title = document.getElementById('idea-title').value.trim();
@@ -127,8 +144,6 @@ async function createIdea() {
     fd.append('title', title);
     fd.append('description', document.getElementById('idea-desc').value);
     fd.append('system_prompt', document.getElementById('idea-system-prompt').value);
-    const archId = document.getElementById('idea-architect').value;
-    if (archId) fd.append('architect_user_id', archId);
 
     const res = await fetch('/api/ideas', { method: 'POST', body: fd });
     if (res.ok) {
@@ -144,7 +159,6 @@ function showCreateIdea() {
     document.getElementById('idea-title').value = '';
     document.getElementById('idea-desc').value = '';
     document.getElementById('idea-system-prompt').value = '';
-    document.getElementById('idea-architect').value = '';
     document.getElementById('create-idea-modal').style.display = 'flex';
 }
 
@@ -180,13 +194,32 @@ async function deleteIdea(ideaId) {
     if (res.ok) window.location.reload();
 }
 
-async function generateProject(ideaId) {
+function showArchitectSelect(ideaId) {
+    document.getElementById('architect-select-idea-id').value = ideaId;
+    document.getElementById('architect-select-user').value = '';
+    document.getElementById('architect-select-modal').style.display = 'flex';
+}
+
+async function generateProject() {
+    const ideaId = document.getElementById('architect-select-idea-id').value;
+    const architectUserId = document.getElementById('architect-select-user').value;
+    
+    if (!architectUserId) {
+        alert('Please select an Architect AI user.');
+        return;
+    }
+    
+    closeModal('architect-select-modal');
+    
     const overlay = document.getElementById('generate-overlay');
     overlay.style.display = 'flex';
     document.getElementById('generate-status-text').textContent = 'Architect is analyzing your idea...';
 
     try {
-        const res = await fetch(`/api/ideas/${ideaId}/generate`, { method: 'POST' });
+        const fd = new FormData();
+        fd.append('architect_user_id', architectUserId);
+        
+        const res = await fetch(`/api/ideas/${ideaId}/generate`, { method: 'POST', body: fd });
         const data = await res.json();
         overlay.style.display = 'none';
 
@@ -194,7 +227,6 @@ async function generateProject(ideaId) {
             alert(`✅ Project "${data.project_name}" created with ${data.tasks_count} tasks!`);
             window.location = `/project/${data.project_id}`;
         } else if (data.status === 'questions') {
-            // Reload to show questions on the card
             window.location.reload();
         } else {
             alert('Generation failed. Check the architect configuration.');
