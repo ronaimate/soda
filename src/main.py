@@ -967,10 +967,26 @@ Return ONLY valid JSON, no other text."""
     async def list_models():
         """List available AI models from OpenCode"""
         try:
+            # Write global OpenCode API key to auth.json so the CLI can authenticate
+            opencode_api_key = await _get_opencode_api_key()
+            auth_dir = OPENCODE_AUTH.parent
+            auth_dir.mkdir(parents=True, exist_ok=True)
+            auth_data = {}
+            if opencode_api_key:
+                auth_data["apiKey"] = opencode_api_key
+            with open(OPENCODE_AUTH, "w") as f:
+                json.dump(auth_data, f)
+
+            # Build env with API key
+            env = os.environ.copy()
+            if opencode_api_key:
+                env["OPENCODE_API_KEY"] = opencode_api_key
+
             proc = await asyncio.create_subprocess_shell(
                 "opencode models",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             stdout, stderr = await proc.communicate()
             
