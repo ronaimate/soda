@@ -1602,23 +1602,72 @@ Return your review as JSON:
             return None
 
     async def _ensure_github_repo(owner: str, repo_name: str, token: str, private: bool = True) -> dict:
-        """Ensure the GitHub repository exists, create if it doesn't."""
+        """Ensure the GitHub repository exists, create if it doesn't.
+        Also commits a .gitignore file to the repo."""
+        import base64
         headers = {
             "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json"
         }
-        
-        # Check if repo exists
+
+        # Standard .gitignore content
+        gitignore_content = """# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Node
+node_modules/
+
+# Docker
+docker-compose.override.yml
+
+# Temp
+/tmp/
+tmp/
+"""
+
         async with httpx.AsyncClient() as client:
             check_url = f"https://api.github.com/repos/{owner}/{repo_name}"
             check_resp = await client.get(check_url, headers=headers)
-            
+
             if check_resp.status_code == 200:
-                return {"status": "exists", "data": check_resp.json()}
-            
+                repo_data = check_resp.json()
+                # Repo already exists — commit .gitignore if not present
+                await _commit_gitignore(client, headers, owner, repo_name, repo_data.get("default_branch", "main"))
+                return {"status": "exists", "data": repo_data}
+
             if check_resp.status_code != 404:
                 return {"status": "error", "message": f"GitHub API error: {check_resp.text}"}
-            
+
             # Create the repository
             create_url = "https://api.github.com/user/repos"
             create_data = {
@@ -1628,11 +1677,74 @@ Return your review as JSON:
                 "description": f"Created by Soda"
             }
             create_resp = await client.post(create_url, headers=headers, json=create_data)
-            
+
             if create_resp.status_code in [200, 201]:
-                return {"status": "created", "data": create_resp.json()}
+                repo_data = create_resp.json()
+                # Commit .gitignore to the newly created repo
+                await _commit_gitignore(client, headers, owner, repo_name, repo_data.get("default_branch", "main"))
+                return {"status": "created", "data": repo_data}
             else:
                 return {"status": "error", "message": f"Failed to create repo: {create_resp.text}"}
+
+    async def _commit_gitignore(client: httpx.AsyncClient, headers: dict, owner: str, repo_name: str, branch: str) -> None:
+        """Commit a .gitignore file to the repo via GitHub API."""
+        import base64
+        # Check if .gitignore already exists
+        gitignore_url = f"https://api.github.com/repos/{owner}/{repo_name}/contents/.gitignore"
+        existing = await client.get(gitignore_url, headers=headers)
+        if existing.status_code == 200:
+            return  # Already exists, skip
+
+        # Create .gitignore via GitHub API
+        content_encoded = base64.b64encode(b"""# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Node
+node_modules/
+
+# Docker
+docker-compose.override.yml
+
+# Temp
+/tmp/
+tmp/
+""").decode()
+        put_data = {
+            "message": "Add .gitignore",
+            "content": content_encoded,
+            "branch": branch
+        }
+        await client.put(gitignore_url, headers=headers, json=put_data)
 
     @app.post("/api/tasks/{task_id}/git-commit")
     async def git_commit_push(
