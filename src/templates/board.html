@@ -277,6 +277,7 @@ async function showTaskDetail(taskId) {
             <button class="btn btn-sm" onclick="moveTask(${taskId}, 'review')">👁 Review</button>
             <button class="btn btn-sm btn-success" onclick="moveTask(${taskId}, 'done')">✓ Done</button>
             <button class="btn btn-sm btn-danger" onclick="deleteTask(${taskId})">🗑 Delete</button>
+            ${task.column === 'running' ? `<button class="btn btn-sm btn-warning" onclick="killTaskProcess(${taskId})" style="margin-left:8px;">⏹ Kill Process</button>` : ''}
             ${task.column === 'done' ? `<button class="btn btn-sm btn-success" onclick="showGitCommitModal(${taskId})">📦 Commit & Push</button>` : ''}
         </div>
     </div>`;
@@ -377,6 +378,18 @@ async function deleteProject(projectId) {
     } else {
         const err = await res.json();
         alert('Error: ' + (err.detail || 'Failed to delete project'));
+    }
+}
+
+async function killTaskProcess(taskId) {
+    if (!confirm('⚠️ Kill the running process for this task? This will move the task to blocked.')) return;
+    const res = await fetch(`/api/tasks/${taskId}/kill`, { method: 'POST' });
+    if (res.ok) {
+        closeModal('task-modal');
+        window.location.reload();
+    } else {
+        const err = await res.json();
+        alert('Error: ' + (err.detail || 'Failed to kill process'));
     }
 }
 

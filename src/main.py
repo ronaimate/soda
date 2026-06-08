@@ -1758,10 +1758,67 @@ Return your review as JSON:
 
     @app.get("/api/tasks/{task_id}/process")
     async def get_process_status(task_id: int):
-        proc = running_processes.get(task_id)
-        if not proc:
-            return {"running": False}
-        return {"running": proc.returncode is None, "exit_code": proc.returncode}
+        """Get the running process status for a task."""
+        proc_info = running_processes.get(task_id)
+        if not proc_info:
+            return {"running": False, "exit_code": None}
+        
+        if isinstance(proc_info, tuple):
+            proc, stdout_fd, stderr_fd = proc_info
+        else:
+            proc = proc_info
+        
+        return {
+            "running": proc.returncode is None,
+            "exit_code": proc.returncode,
+            "pid": proc.pid if hasattr(proc, 'pid') else None,
+        }
+
+    @app.post("/api/tasks/{task_id}/kill")
+    async def kill_task_process(task_id: int):
+        """Kill a running process for a task and move it to blocked."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        proc_info = running_processes.get(task_id)
+        if not proc_info:
+            raise HTTPException(404, "No running process for this task")
+        
+        if isinstance(proc_info, tuple):
+            proc, stdout_fd, stderr_fd = proc_info
+            try:
+                stdout_fd.close()
+                stderr_fd.close()
+            except Exception:
+                pass
+        else:
+            proc = proc_info
+        
+        if proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+                logger.info(f"Killed process for task {task_id}")
+            except Exception as e:
+                logger.error(f"Error killing process for task {task_id}: {e}")
+        
+        del running_processes[task_id]
+        
+        # Move task to blocked
+        async with async_session() as session:
+            task = await session.get(Task, task_id)
+            if task:
+                task.board_column = "blocked"
+                comment = TaskComment(
+                    task_id=task.id,
+                    author="Soda",
+                    content="⚠️ Process was killed — task moved to blocked. The AI process may have crashed or timed out."
+                )
+                session.add(comment)
+                await session.commit()
+                return {"ok": True, "message": "Process killed, task moved to blocked"}
+        
+        raise HTTPException(404, "Task not found")
 
     # ── API: Health check ──────────────────────────────────────────
 
