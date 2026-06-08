@@ -166,6 +166,17 @@ async function drop(e) {
         return;
     }
 
+    // Check if moving to running — only one task allowed in progress at a time
+    if (column === 'running') {
+        const projectRes = await fetch(`/api/projects/${task.project_id}/tasks`);
+        const allTasks = await projectRes.json();
+        const runningTask = allTasks.find(t => t.column === 'running');
+        if (runningTask && runningTask.id !== parseInt(taskId)) {
+            alert('⚠️ Another task is already in progress. This feature does not support parallel task execution yet. Please complete or move the current task first.');
+            return;
+        }
+    }
+
     const res = await fetch(`/api/tasks/${taskId}/move`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -324,13 +335,31 @@ async function removeTaskDependency(taskId, dependsOnId) {
 }
 
 async function moveTask(taskId, column) {
-    await fetch(`/api/tasks/${taskId}/move`, {
+    // Check if moving to running — only one task allowed in progress at a time
+    if (column === 'running') {
+        const taskRes = await fetch(`/api/tasks/${taskId}`);
+        const task = await taskRes.json();
+        const projectRes = await fetch(`/api/projects/${task.project_id}/tasks`);
+        const allTasks = await projectRes.json();
+        const runningTask = allTasks.find(t => t.column === 'running');
+        if (runningTask && runningTask.id !== parseInt(taskId)) {
+            alert('⚠️ Another task is already in progress. This feature does not support parallel task execution yet. Please complete or move the current task first.');
+            return;
+        }
+    }
+
+    const res = await fetch(`/api/tasks/${taskId}/move`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({column})
     });
-    closeModal('task-modal');
-    window.location.reload();
+    if (res.ok) {
+        closeModal('task-modal');
+        window.location.reload();
+    } else {
+        const err = await res.json();
+        alert('Error: ' + (err.detail || 'Failed to move task'));
+    }
 }
 
 async function deleteTask(taskId) {

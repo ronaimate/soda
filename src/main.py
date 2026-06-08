@@ -583,6 +583,20 @@ def create_app() -> FastAPI:
             if new_column not in ("backlog", "running", "blocked", "review", "done"):
                 raise HTTPException(400, f"Invalid column: {new_column}")
 
+            # Check if moving to running — only one task allowed in progress at a time
+            if new_column == "running":
+                running_result = await session.execute(
+                    sa_select(Task).where(
+                        Task.project_id == task.project_id,
+                        Task.board_column == "running",
+                        Task.id != task_id
+                    )
+                )
+                if running_result.scalar_one_or_none():
+                    raise HTTPException(400,
+                        "Another task is already in progress. This feature does not support parallel task execution yet."
+                    )
+
             # Check dependencies: if moving to running/review/done, all dependencies must be done
             if new_column in ("running", "review", "done"):
                 dep_result = await session.execute(
