@@ -58,6 +58,14 @@ async def lifespan(app: FastAPI):
 # ─── App factory ────────────────────────────────────────────────────
 
 def create_app() -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await init_db()
+        # Start watchdog in background
+        watchdog_task = asyncio.create_task(_watchdog_check())
+        yield
+        watchdog_task.cancel()
+
     app = FastAPI(title="Soda", lifespan=lifespan)
 
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -1901,14 +1909,6 @@ Return your review as JSON:
                     await session.commit()
             except Exception as e:
                 _watchdog_logger.error(f"Watchdog error: {e}")
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        await init_db()
-        # Start watchdog in background
-        watchdog_task = asyncio.create_task(_watchdog_check())
-        yield
-        watchdog_task.cancel()
 
     # ── Static files ───────────────────────────────────────────────
 
