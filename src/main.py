@@ -242,11 +242,32 @@ def create_app() -> FastAPI:
 
             # Fetch comments per task
             comments_map = {}
+            # Fetch dependencies per task
+            deps_map = {}
+            task_ids = [t.id for t in tasks]
+            if task_ids:
+                dep_result = await session.execute(
+                    sa_select(TaskDependency.task_id, TaskDependency.depends_on_id)
+                    .where(TaskDependency.task_id.in_(task_ids))
+                )
+                for task_id, dep_id in dep_result.all():
+                    deps_map.setdefault(task_id, []).append(dep_id)
+                
+                # Determine which tasks have unmet dependencies
+                # A dependency is "unmet" if the dependency task is not in "done" column
+                done_ids = {t.id for t in tasks if t.board_column == "done"}
+                unmet_ids = set()
+                for tid, dep_ids in deps_map.items():
+                    if any(d not in done_ids for d in dep_ids):
+                        unmet_ids.add(tid)
+
             for t in tasks:
                 cr = await session.execute(
                     sa_select(TaskComment).where(TaskComment.task_id == t.id).order_by(TaskComment.created_at)
                 )
                 comments_map[t.id] = cr.scalars().all()
+                # Attach has_unmet_deps flag
+                t.has_unmet_deps = t.id in unmet_ids
 
         return templates.TemplateResponse(
             "board.html",
@@ -399,6 +420,16 @@ def create_app() -> FastAPI:
                 {"id": c.id, "author": c.author, "content": c.content, "created_at": str(c.created_at)}
                 for c in result.scalars().all()
             ]
+            # Get dependencies: tasks that this task depends on
+            dep_result = await session.execute(
+                sa_select(TaskDependency.depends_on_id).where(TaskDependency.task_id == task_id)
+            )
+            depends_on = [row[0] for row in dep_result.all()]
+            # Get dependents: tasks that depend on this task
+            dep_result2 = await session.execute(
+                sa_select(TaskDependency.task_id).where(TaskDependency.depends_on_id == task_id)
+            )
+            depended_by = [row[0] for row in dep_result2.all()]
             return {
                 "id": task.id,
                 "project_id": task.project_id,
@@ -409,6 +440,8 @@ def create_app() -> FastAPI:
                 "complexity": task.complexity,
                 "position": task.position,
                 "comments": comments,
+                "depends_on": depends_on,
+                "depended_by": depended_by,
             }
 
     @app.patch("/api/tasks/{task_id}")
@@ -478,6 +511,53 @@ def create_app() -> FastAPI:
             
             return {"ok": True, "message": f"Project '{project.name}' and all its tasks deleted."}
 
+    @app.post("/api/tasks/{task_id}/dependencies")
+    async def add_task_dependency(task_id: int, payload: dict):
+        """Add a dependency: task_id depends on depends_on_id."""
+        depends_on_id = payload.get("depends_on_id")
+        if not depends_on_id:
+            raise HTTPException(400, "depends_on_id is required")
+        
+        async with async_session() as session:
+            # Verify both tasks exist
+            task = await session.get(Task, task_id)
+            if not task:
+                raise HTTPException(404, "Task not found")
+            dep_task = await session.get(Task, depends_on_id)
+            if not dep_task:
+                raise HTTPException(404, "Dependency task not found")
+            
+            # Check for circular dependency
+            if task_id == depends_on_id:
+                raise HTTPException(400, "Cannot depend on itself")
+            
+            # Check if dependency already exists
+            existing = await session.execute(
+                sa_select(TaskDependency).where(
+                    TaskDependency.task_id == task_id,
+                    TaskDependency.depends_on_id == depends_on_id
+                )
+            )
+            if existing.scalar_one_or_none():
+                raise HTTPException(400, "Dependency already exists")
+            
+            session.add(TaskDependency(task_id=task_id, depends_on_id=depends_on_id))
+            await session.commit()
+            return {"ok": True}
+
+    @app.delete("/api/tasks/{task_id}/dependencies/{depends_on_id}")
+    async def remove_task_dependency(task_id: int, depends_on_id: int):
+        """Remove a dependency."""
+        async with async_session() as session:
+            await session.execute(
+                TaskDependency.__table__.delete().where(
+                    TaskDependency.task_id == task_id,
+                    TaskDependency.depends_on_id == depends_on_id
+                )
+            )
+            await session.commit()
+            return {"ok": True}
+
     @app.delete("/api/tasks/{task_id}")
     async def delete_task(task_id: int):
         async with async_session() as session:
@@ -502,6 +582,25 @@ def create_app() -> FastAPI:
 
             if new_column not in ("backlog", "running", "blocked", "review", "done"):
                 raise HTTPException(400, f"Invalid column: {new_column}")
+
+            # Check dependencies: if moving to running/review/done, all dependencies must be done
+            if new_column in ("running", "review", "done"):
+                dep_result = await session.execute(
+                    sa_select(TaskDependency.depends_on_id).where(TaskDependency.task_id == task_id)
+                )
+                dep_ids = [row[0] for row in dep_result.all()]
+                if dep_ids:
+                    # Check if all dependencies are done
+                    dep_tasks_result = await session.execute(
+                        sa_select(Task).where(Task.id.in_(dep_ids))
+                    )
+                    dep_tasks = dep_tasks_result.scalars().all()
+                    not_done = [t for t in dep_tasks if t.board_column != "done"]
+                    if not_done:
+                        dep_titles = ", ".join(t.title for t in not_done)
+                        raise HTTPException(400,
+                            f"Cannot move to '{new_column}': waiting on tasks: {dep_titles}"
+                        )
 
             task.board_column = new_column
 

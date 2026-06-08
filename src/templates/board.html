@@ -28,21 +28,30 @@
         </div>
         <div class="card-list" data-column="{{ col }}" ondrop="drop(event)" ondragover="allowDrop(event)">
             {% for task in tasks if task.board_column == col %}
-            <div class="task-card {% if not task.assignee_id %}task-unassigned{% endif %}" draggable="true" ondragstart="drag(event)" data-task-id="{{ task.id }}" onclick="showTaskDetail({{ task.id }})">
+            <div class="task-card {% if not task.assignee_id %}task-unassigned{% endif %} {% if task.has_unmet_deps %}task-blocked-dep{% endif %}" 
+                 draggable="{% if not task.has_unmet_deps %}true{% else %}false{% endif %}" 
+                 ondragstart="drag(event)" 
+                 data-task-id="{{ task.id }}" 
+                 onclick="showTaskDetail({{ task.id }})">
                 <div class="card-header">
                     <span class="card-title">{{ task.title }}</span>
                 </div>
                 {% if task.complexity %}
                 <span class="badge complexity-{{ task.complexity|lower }}">{{ task.complexity }}</span>
                 {% endif %}
-                {% if task.assignee_id %}
-                {% set assignee = users|selectattr('id', 'equalto', task.assignee_id)|first %}
-                {% if assignee %}
-                <span class="assignee-badge" title="{{ assignee.name }}">{{ assignee.name[:2] }}</span>
-                {% endif %}
-                {% else %}
-                <span class="assignee-badge unassigned" title="No assignee">—</span>
-                {% endif %}
+                <div class="task-badges">
+                    {% if task.assignee_id %}
+                    {% set assignee = users|selectattr('id', 'equalto', task.assignee_id)|first %}
+                    {% if assignee %}
+                    <span class="assignee-badge" title="{{ assignee.name }}">{{ assignee.name[:2] }}</span>
+                    {% endif %}
+                    {% else %}
+                    <span class="assignee-badge unassigned" title="No assignee">—</span>
+                    {% endif %}
+                    {% if task.has_unmet_deps %}
+                    <span class="dep-badge" title="Waiting on dependencies">⏳</span>
+                    {% endif %}
+                </div>
             </div>
             {% endfor %}
         </div>
@@ -172,6 +181,30 @@ async function showTaskDetail(taskId) {
     const modal = document.getElementById('task-modal');
     const content = document.getElementById('task-detail-content');
 
+    // Build dependency list HTML
+    let depsHtml = '';
+    if (task.depends_on && task.depends_on.length > 0) {
+        // Fetch dependency task titles
+        const depPromises = task.depends_on.map(depId => fetch(`/api/tasks/${depId}`).then(r => r.json()));
+        const depTasks = await Promise.all(depPromises);
+        depsHtml = '<ul style="margin:4px 0 8px 16px; padding:0;">';
+        for (const dt of depTasks) {
+            const statusColor = dt.column === 'done' ? 'var(--green)' : 'var(--orange)';
+            depsHtml += `<li style="color:${statusColor}; font-size:0.85em;">${dt.title} <span class="badge" style="font-size:0.7em; background:${statusColor}; color:#000;">${dt.column}</span></li>`;
+        }
+        depsHtml += '</ul>';
+    } else {
+        depsHtml = '<span class="help-text">No dependencies</span>';
+    }
+
+    // Build dependency select options (all tasks in project except this one and current deps)
+    const allTasksRes = await fetch(`/api/projects/${task.project_id}/tasks`);
+    const allTasks = await allTasksRes.json();
+    const depSelectOptions = allTasks
+        .filter(t => t.id !== taskId && !(task.depends_on || []).includes(t.id))
+        .map(t => `<option value="${t.id}">${t.title}</option>`)
+        .join('');
+
     let html = `<div class="task-detail">
         <h2>${task.title}</h2>
         <div class="task-meta">
@@ -186,6 +219,14 @@ async function showTaskDetail(taskId) {
                 {% for u in users %}
                 <option value="{{ u.id }}" ${task.assignee_id == {{ u.id }} ? 'selected' : ''}>{{ u.name }} ({{ u.type }})</option>
                 {% endfor %}
+            </select>
+        </div>
+        <div class="task-dependencies" style="margin-bottom:16px; padding:10px 12px; background:var(--bg); border-radius:var(--radius); border:1px solid var(--border);">
+            <label><strong>⏳ Dependencies (must be done before this task):</strong></label>
+            <div id="task-deps-list" style="margin-top:6px;">${depsHtml}</div>
+            <select id="add-dep-select" onchange="addTaskDependency(${taskId}, this.value)" style="margin-top:8px;">
+                <option value="">+ Add dependency...</option>
+                ${depSelectOptions}
             </select>
         </div>
         <div class="task-comments">
@@ -249,6 +290,30 @@ async function updateTaskAssignee(taskId, assigneeId) {
     });
     if (!res.ok) {
         alert('Failed to update assignee');
+    }
+}
+
+async function addTaskDependency(taskId, dependsOnId) {
+    if (!dependsOnId) return;
+    const res = await fetch(`/api/tasks/${taskId}/dependencies`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({depends_on_id: parseInt(dependsOnId)})
+    });
+    if (res.ok) {
+        showTaskDetail(taskId);
+    } else {
+        const err = await res.json();
+        alert('Error: ' + (err.detail || 'Failed to add dependency'));
+    }
+}
+
+async function removeTaskDependency(taskId, dependsOnId) {
+    const res = await fetch(`/api/tasks/${taskId}/dependencies/${dependsOnId}`, {
+        method: 'DELETE'
+    });
+    if (res.ok) {
+        showTaskDetail(taskId);
     }
 }
 

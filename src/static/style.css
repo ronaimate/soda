@@ -542,7 +542,32 @@ textarea { resize: vertical; min-height: 60px; }
     border-color: var(--accent);
 }
 
-/* ── Git commit ──────────────────────────────────────── */
+/* ── Dependency badges ──────────────────────────────── */
+.task-badges {
+    display: flex;
+    gap: 4px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+}
+.dep-badge {
+    font-size: 0.75em;
+    padding: 2px 5px;
+    border-radius: 4px;
+    background: var(--orange);
+    color: #000;
+    font-weight: 600;
+}
+.task-blocked-dep {
+    border-color: var(--orange) !important;
+    opacity: 0.7;
+}
+.task-blocked-dep .card-title {
+    text-decoration: line-through;
+    color: var(--text2);
+}
+.task-blocked-dep[draggable="false"] {
+    cursor: not-allowed !important;
+}
 .git-status {
     margin: 8px 0;
     font-size: 0.85em;
