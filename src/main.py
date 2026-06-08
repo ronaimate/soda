@@ -835,6 +835,8 @@ def create_app() -> FastAPI:
             project = Project(
                 name=result.get("project_name", idea.title),
                 description=result.get("project_description", idea.description),
+                repo_name=repo_name,
+                repo_url=repo_url,
             )
             session.add(project)
             await session.commit()
@@ -1319,16 +1321,14 @@ Return ONLY valid JSON, no other text."""
                     project = await session.get(Project, task.project_id)
                     pr_username = await _get_setting(session, "git_username")
                     pr_token = await _get_setting(session, "git_token")
-                    pr_default_repo = await _get_setting(session, "git_default_repo")
                     pr_default_branch = await _get_setting(session, "git_default_branch", "main")
                     if pr_username and pr_token:
-                        repo_name = pr_default_repo
-                        if project and project.name:
-                            repo_name = pr_default_repo or re.sub(r'[^a-z0-9-]', '', project.name.lower().replace(' ', '-'))[:100]
+                        # Use the project's repo name (set during project generation)
+                        repo_name = project.repo_name if project and project.repo_name else f"soda-{task.project_id}"
                         pr_url = await _create_github_pr(
                             session=session, task=task, project=project, workdir=workdir,
                             username=pr_username, token=pr_token,
-                            repo_name=repo_name or f"soda-{task.project_id}",
+                            repo_name=repo_name,
                             default_branch=pr_default_branch,
                         )
                         if pr_url:

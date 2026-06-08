@@ -184,17 +184,23 @@ async function showTaskDetail(taskId) {
     // Build dependency list HTML
     let depsHtml = '';
     if (task.depends_on && task.depends_on.length > 0) {
-        // Fetch dependency task titles
         const depPromises = task.depends_on.map(depId => fetch(`/api/tasks/${depId}`).then(r => r.json()));
         const depTasks = await Promise.all(depPromises);
-        depsHtml = '<ul style="margin:4px 0 8px 16px; padding:0;">';
+        depsHtml = '<div style="display:flex; flex-direction:column; gap:4px; margin:6px 0;">';
         for (const dt of depTasks) {
-            const statusColor = dt.column === 'done' ? 'var(--green)' : 'var(--orange)';
-            depsHtml += `<li style="color:${statusColor}; font-size:0.85em;">${dt.title} <span class="badge" style="font-size:0.7em; background:${statusColor}; color:#000;">${dt.column}</span></li>`;
+            const isDone = dt.column === 'done';
+            const color = isDone ? 'var(--green)' : 'var(--red)';
+            const icon = isDone ? '✅' : '🔴';
+            depsHtml += `<div style="display:flex; align-items:center; gap:6px; padding:4px 8px; background:var(--bg); border-radius:4px; border-left:3px solid ${color};">
+                <span>${icon}</span>
+                <span style="flex:1; font-size:0.85em;">${dt.title}</span>
+                <span class="badge" style="font-size:0.65em; background:${isDone?'var(--green)':'var(--red)'}; color:#000;">${dt.column}</span>
+                <button onclick="removeTaskDependency(${taskId}, ${dt.id})" style="background:none; border:none; color:var(--red); cursor:pointer; font-size:0.8em;" title="Remove dependency">✕</button>
+            </div>`;
         }
-        depsHtml += '</ul>';
+        depsHtml += '</div>';
     } else {
-        depsHtml = '<span class="help-text">No dependencies</span>';
+        depsHtml = '<span class="help-text" style="display:block; margin:6px 0;">No dependencies — task can be started anytime</span>';
     }
 
     // Build dependency select options (all tasks in project except this one and current deps)

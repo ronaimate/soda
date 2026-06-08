@@ -548,6 +548,7 @@ textarea { resize: vertical; min-height: 60px; }
     gap: 4px;
     margin-top: 6px;
     flex-wrap: wrap;
+    align-items: center;
 }
 .dep-badge {
     font-size: 0.75em;
@@ -559,7 +560,8 @@ textarea { resize: vertical; min-height: 60px; }
 }
 .task-blocked-dep {
     border-color: var(--orange) !important;
-    opacity: 0.7;
+    opacity: 0.5;
+    filter: grayscale(0.8);
 }
 .task-blocked-dep .card-title {
     text-decoration: line-through;
@@ -567,6 +569,9 @@ textarea { resize: vertical; min-height: 60px; }
 }
 .task-blocked-dep[draggable="false"] {
     cursor: not-allowed !important;
+}
+.task-blocked-dep:hover {
+    opacity: 0.7;
 }
 .git-status {
     margin: 8px 0;
