@@ -483,7 +483,7 @@ def create_app() -> FastAPI:
             task_ids = [t.id for t in tasks]
             
             if task_ids:
-                # Delete task comments
+                # Delete task comments first
                 await session.execute(
                     TaskComment.__table__.delete().where(TaskComment.task_id.in_(task_ids))
                 )
@@ -500,13 +500,16 @@ def create_app() -> FastAPI:
                         )
                     )
                 except Exception:
-                    pass  # Table might not exist or have different structure
-                # Delete the tasks
-                for task in tasks:
-                    await session.delete(task)
+                    pass
+                # Delete the tasks themselves
+                await session.execute(
+                    Task.__table__.delete().where(Task.id.in_(task_ids))
+                )
             
-            # Delete the project
-            await session.delete(project)
+            # Now delete the project (no more FK violations)
+            await session.execute(
+                Project.__table__.delete().where(Project.id == project_id)
+            )
             await session.commit()
             
             return {"ok": True, "message": f"Project '{project.name}' and all its tasks deleted."}

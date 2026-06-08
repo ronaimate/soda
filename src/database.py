@@ -191,6 +191,70 @@ async def init_db():
         if result.first() is None:
             await conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN repo_name VARCHAR(255)")
             await conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN repo_url VARCHAR(500)")
+        
+        # Fix ForeignKey constraints for CASCADE delete
+        # Drop and recreate tasks.project_id FK with CASCADE
+        try:
+            await conn.exec_driver_sql("""
+                DO $$
+                BEGIN
+                    ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_project_id_fkey;
+                    ALTER TABLE tasks ADD CONSTRAINT tasks_project_id_fkey 
+                        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE;
+                EXCEPTION WHEN duplicate_object THEN
+                    NULL;
+                END $$;
+            """)
+        except Exception:
+            pass
+        
+        # Drop and recreate task_comments.task_id FK with CASCADE
+        try:
+            await conn.exec_driver_sql("""
+                DO $$
+                BEGIN
+                    ALTER TABLE task_comments DROP CONSTRAINT IF EXISTS task_comments_task_id_fkey;
+                    ALTER TABLE task_comments ADD CONSTRAINT task_comments_task_id_fkey 
+                        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE;
+                EXCEPTION WHEN duplicate_object THEN
+                    NULL;
+                END $$;
+            """)
+        except Exception:
+            pass
+        
+        # Drop and recreate task_git_state.task_id FK with CASCADE
+        try:
+            await conn.exec_driver_sql("""
+                DO $$
+                BEGIN
+                    ALTER TABLE task_git_state DROP CONSTRAINT IF EXISTS task_git_state_task_id_fkey;
+                    ALTER TABLE task_git_state ADD CONSTRAINT task_git_state_task_id_fkey 
+                        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE;
+                EXCEPTION WHEN duplicate_object THEN
+                    NULL;
+                END $$;
+            """)
+        except Exception:
+            pass
+        
+        # Drop and recreate task_dependencies FKs with CASCADE
+        try:
+            await conn.exec_driver_sql("""
+                DO $$
+                BEGIN
+                    ALTER TABLE task_dependencies DROP CONSTRAINT IF EXISTS task_dependencies_task_id_fkey;
+                    ALTER TABLE task_dependencies ADD CONSTRAINT task_dependencies_task_id_fkey 
+                        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE;
+                    ALTER TABLE task_dependencies DROP CONSTRAINT IF EXISTS task_dependencies_depends_on_id_fkey;
+                    ALTER TABLE task_dependencies ADD CONSTRAINT task_dependencies_depends_on_id_fkey 
+                        FOREIGN KEY (depends_on_id) REFERENCES tasks(id) ON DELETE CASCADE;
+                EXCEPTION WHEN duplicate_object THEN
+                    NULL;
+                END $$;
+            """)
+        except Exception:
+            pass
     
     # Initialize default settings
     async with async_session() as session:
