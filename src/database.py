@@ -275,11 +275,24 @@ async def init_db():
         if not result.scalars().all():
             _default_model = "anthropic/claude-sonnet-4"
 
-            # Execute commands use {{task.prompt}} which is replaced at runtime
-            _junior_exec = "opencode run '{{task.prompt}}'\n\nWorking directory: {{task.workdir}}\nCallback URL: {{callback.url}}?taskId={{task.id}}&status=review\nIf blocked: {{callback.url}}?taskId={{task.id}}&status=blocked&question=YOUR_QUESTION"
+            # Execute commands: run OpenCode, then auto-send callback
+            _callback_tpl = "{{callback.url}}?taskId={{task.id}}"
+            _junior_exec = (
+                "opencode run '{{task.prompt}}' && "
+                "curl -s -X POST '" + _callback_tpl + "&status=review' "
+                "|| true"
+            )
             _medior_exec = _junior_exec
             _senior_exec = _junior_exec
-            _taskmaster_exec = "opencode run 'You are the Task Master. Analyze the following project idea and break it down into actionable tasks.\n\nProject: {{project.name}}\nDescription: {{project.description}}\n\nCreate a structured task list with dependencies. Output as JSON with project_name, project_description, and tasks array. Each task should have: title, description, complexity (low/medium/high), assignee_role (junior/medior/senior), and depends_on (array of task indices, empty if none).\n\nIMPORTANT: Output ONLY valid JSON, no markdown formatting or code blocks.'"
+            _taskmaster_exec = (
+                "opencode run 'You are the Task Master. Analyze the following project idea and break it down into actionable tasks.\n\n"
+                "Project: {{project.name}}\n"
+                "Description: {{project.description}}\n\n"
+                "Create a structured task list with dependencies. Output as JSON with project_name, project_description, and tasks array. "
+                "Each task should have: title, description, complexity (low/medium/high), assignee_role (junior/medior/senior), "
+                "and depends_on (array of task indices, empty if none).\n\n"
+                "IMPORTANT: Output ONLY valid JSON, no markdown formatting or code blocks.'"
+            )
 
             seed_users = [
                 User(
