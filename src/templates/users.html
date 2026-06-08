@@ -62,8 +62,6 @@
 </div>
 
 <script>
-const DEFAULT_EXECUTE_CMD = "opencode run '{{task.prompt}}'\n\nWorking directory: {{task.workdir}}\nCallback URL: {{callback.url}}?taskId={{task.id}}&status=review\nIf blocked: {{callback.url}}?taskId={{task.id}}&status=blocked&question=YOUR_QUESTION";
-
 async function fetchModels() {
     const helpText = document.getElementById('model-help');
     const modelSelect = document.getElementById('user-model');
