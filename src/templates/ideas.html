@@ -42,7 +42,7 @@
             {% elif idea.status == 'generated' %}
                 <span class="badge status-generated">✅ Project created</span>
             {% endif %}
-            <button class="btn btn-sm" onclick="showEditIdea({{ idea.id }}, '{{ idea.title|e }}', '{{ (idea.description or '')|e }}', '{{ (idea.system_prompt or '')|e }}')">Edit</button>
+            <button class="btn btn-sm" onclick="showEditIdea({{ idea.id }}, '{{ idea.title|e }}', '{{ (idea.description or '')|e }}')">Edit</button>
             <button class="btn btn-sm btn-danger" onclick="deleteIdea({{ idea.id }})">Delete</button>
         </div>
     </div>
@@ -63,8 +63,6 @@
             <input type="text" id="idea-title" required placeholder="e.g. Recipe book app">
             <label>Description</label>
             <textarea id="idea-desc" rows="4" placeholder="Describe your idea in detail..."></textarea>
-            <label>System Prompt for Architect AI</label>
-            <textarea id="idea-system-prompt" rows="3" placeholder="Optional: extra instructions for the Architect when generating tasks..."></textarea>
             <button class="btn btn-primary" onclick="createIdea()" style="margin-top:16px">Create Idea</button>
         </div>
     </div>
@@ -81,8 +79,6 @@
             <input type="text" id="edit-idea-title" required>
             <label>Description</label>
             <textarea id="edit-idea-desc" rows="4"></textarea>
-            <label>System Prompt for Architect AI</label>
-            <textarea id="edit-idea-system-prompt" rows="3"></textarea>
             <button class="btn btn-primary" onclick="updateIdea()" style="margin-top:16px">Save</button>
         </div>
     </div>
@@ -148,7 +144,6 @@ async function createIdea() {
     const fd = new FormData();
     fd.append('title', title);
     fd.append('description', document.getElementById('idea-desc').value);
-    fd.append('system_prompt', document.getElementById('idea-system-prompt').value);
 
     const res = await fetch('/api/ideas', { method: 'POST', body: fd });
     if (res.ok) {
@@ -167,11 +162,10 @@ function showCreateIdea() {
     document.getElementById('create-idea-modal').style.display = 'flex';
 }
 
-function showEditIdea(id, title, desc, sysPrompt) {
+function showEditIdea(id, title, desc) {
     document.getElementById('edit-idea-id').value = id;
     document.getElementById('edit-idea-title').value = title;
     document.getElementById('edit-idea-desc').value = desc;
-    document.getElementById('edit-idea-system-prompt').value = sysPrompt;
     document.getElementById('edit-idea-modal').style.display = 'flex';
 }
 
@@ -180,7 +174,6 @@ async function updateIdea() {
     const fd = new FormData();
     fd.append('title', document.getElementById('edit-idea-title').value);
     fd.append('description', document.getElementById('edit-idea-desc').value);
-    fd.append('system_prompt', document.getElementById('edit-idea-system-prompt').value);
 
     const res = await fetch(`/api/ideas/${id}`, { method: 'PATCH', body: fd });
     if (res.ok) { closeModal('edit-idea-modal'); window.location.reload(); }

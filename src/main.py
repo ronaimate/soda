@@ -245,6 +245,19 @@ def create_app() -> FastAPI:
         if opencode_api_key:
             env["OPENCODE_API_KEY"] = opencode_api_key
 
+        # Save the full prompt as a comment so it's visible in the task detail
+        try:
+            async with async_session() as prompt_session:
+                prompt_comment = TaskComment(
+                    task_id=task.id,
+                    author="Soda",
+                    content=f"📋 **Prompt sent to AI:**\n\n{full_prompt}",
+                )
+                prompt_session.add(prompt_comment)
+                await prompt_session.commit()
+        except Exception:
+            pass  # Non-critical: if comment save fails, continue anyway
+
         # Run the command in the task workdir, capture output to file
         stdout_file = workdir / ".soda-stdout.log"
         stderr_file = workdir / ".soda-stderr.log"

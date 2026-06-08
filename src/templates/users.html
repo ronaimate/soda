@@ -113,7 +113,18 @@ async function showEditUser(userId) {
     toggleAI(u.type || 'human');
 
     if (u.type === 'ai') {
-        document.getElementById('user-model').value = u.model || '';
+        // Load models first, then set the selected value
+        await fetchModels();
+        // If the user's model is not in the list, add it as an option
+        const modelSelect = document.getElementById('user-model');
+        const existingOption = modelSelect.querySelector(`option[value="${u.model || ''}"]`);
+        if (!existingOption && u.model) {
+            const opt = document.createElement('option');
+            opt.value = u.model;
+            opt.textContent = u.model;
+            modelSelect.appendChild(opt);
+        }
+        modelSelect.value = u.model || '';
     }
 
     document.getElementById('user-modal').style.display = 'flex';
