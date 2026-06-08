@@ -117,7 +117,9 @@ def create_app() -> FastAPI:
     # ── Helper: run execute command ─────────────────────────────────
 
     async def _run_execute_command(task: Task, assignee: User) -> None:
-        """Run the AI user's execute command as a subprocess."""
+        """Run the AI user's execute command as a subprocess.
+        Clones the project repo, checks out main, and provides context about
+        remaining tasks so the AI only works on this specific task."""
         if not assignee.execute_command:
             return
 
@@ -137,7 +139,7 @@ def create_app() -> FastAPI:
                 for c in result.scalars().all()
             ]
 
-        # Get callback URL and project name from settings
+        # Get callback URL, project info, and git auth from settings
         async with async_session() as session:
             result = await session.execute(
                 sa_select(GlobalSetting).where(GlobalSetting.key == "callback_url")
@@ -145,17 +147,86 @@ def create_app() -> FastAPI:
             setting = result.scalar_one_or_none()
             callback_url = setting.value if setting else "http://localhost:8000/api/callback"
 
-        async with async_session() as session:
             project = await session.get(Project, task.project_id)
             project_name = project.name if project else ""
+            repo_name = project.repo_name if project else ""
+            repo_url = project.repo_url if project else ""
 
-        # Create task workdir
+            # Get git credentials for authenticated clone
+            git_username = await _get_setting(session, "git_username")
+            git_token = await _get_setting(session, "git_token")
+
+            # Get remaining tasks in this project (excluding this one) for context
+            remaining_result = await session.execute(
+                sa_select(Task).where(
+                    Task.project_id == task.project_id,
+                    Task.id != task.id,
+                ).order_by(Task.id)
+            )
+            remaining_tasks = remaining_result.scalars().all()
+            remaining_summary = "\n".join(
+                f"- [{t.board_column}] {t.title}: {t.description or '(no description)'}"
+                for t in remaining_tasks
+            )
+
+        # Build authenticated repo URL for git clone
+        auth_repo_url = repo_url
+        if repo_url and git_username and git_token:
+            # Convert https://github.com/user/repo.git to https://user:token@github.com/user/repo.git
+            auth_repo_url = repo_url.replace("https://github.com/", f"https://{git_username}:{git_token}@github.com/")
+            auth_repo_url = auth_repo_url.replace("http://github.com/", f"https://{git_username}:{git_token}@github.com/")
+
+        # Create task workdir and clone repo
         workdir_base = Path("/tmp/soda-task-workdirs")
         workdir_base.mkdir(parents=True, exist_ok=True)
         workdir = workdir_base / f"task-{task.id}"
         workdir.mkdir(parents=True, exist_ok=True)
 
-        # Resolve template variables
+        # Clone the project repo and checkout main
+        if auth_repo_url:
+            import shutil
+            import subprocess as sp
+            try:
+                # Remove old workdir contents if any
+                for item in workdir.iterdir():
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+                # Clone and checkout main
+                sp.run(["git", "clone", auth_repo_url, str(workdir)], check=True, capture_output=True, timeout=60)
+                sp.run(["git", "checkout", "main"], cwd=str(workdir), check=True, capture_output=True, timeout=30)
+                sp.run(["git", "pull", "origin", "main"], cwd=str(workdir), check=True, capture_output=True, timeout=30)
+            except Exception as e:
+                # If clone fails, continue with empty workdir — AI will create files from scratch
+                pass
+
+        # Build the full prompt with context
+        full_prompt = f"""You are working on a software project.
+
+## Project: {project_name}
+
+## Your Task (ONLY work on this):
+**Title:** {task.title}
+**Description:** {task.description or '(no description)'}
+**Complexity:** {task.complexity or 'not specified'}
+
+## Other tasks in this project (DO NOT work on these — they will be handled separately):
+{remaining_summary if remaining_summary else '(none)'}
+
+## Existing comments on this task:
+{json.dumps(comments, indent=2) if comments else '(none)'}
+
+## Instructions:
+- ONLY implement what is described in "Your Task" above
+- Do NOT work on any of the other tasks listed above
+- Work in the current directory: {workdir}
+- When finished, report your status via the callback URL
+- Callback URL: {callback_url}?taskId={task.id}&status=review
+- If you have a question, use: {callback_url}?taskId={task.id}&status=blocked&question=YOUR_QUESTION
+"""
+
+        # Resolve template variables in the execute command
         cmd = assignee.execute_command
         cmd = cmd.replace("{{task.id}}", str(task.id))
         cmd = cmd.replace("{{task.title}}", task.title or "")
@@ -165,6 +236,9 @@ def create_app() -> FastAPI:
         cmd = cmd.replace("{{project.name}}", project_name)
         cmd = cmd.replace("{{callback.url}}", callback_url)
         cmd = cmd.replace("{{task.workdir}}", str(workdir))
+
+        # Replace {{task.prompt}} with the full context prompt if present
+        cmd = cmd.replace("{{task.prompt}}", full_prompt)
 
         # Build environment with OpenCode API key injected
         env = os.environ.copy()
