@@ -218,6 +218,10 @@ def create_app() -> FastAPI:
 - If you cannot complete the task, describe what is blocking you as the last line of your output
 """
 
+        # Write prompt to file (prevents shell quoting issues with special chars)
+        prompt_file = workdir / ".soda-prompt.txt"
+        prompt_file.write_text(full_prompt)
+
         # Resolve template variables
         cmd = assignee.execute_command
         cmd = cmd.replace("{{task.id}}", str(task.id))
@@ -228,7 +232,11 @@ def create_app() -> FastAPI:
         cmd = cmd.replace("{{project.name}}", project_name)
         cmd = cmd.replace("{{callback.url}}", callback_url)
         cmd = cmd.replace("{{task.workdir}}", str(workdir))
-        cmd = cmd.replace("{{task.prompt}}", full_prompt)
+        # Replace {{task.prompt}} with file contents via shell substitution
+        # Removes surrounding single quotes too, so shell quoting doesn't break
+        cmd = cmd.replace("'{{task.prompt}}'", f'"$(cat {prompt_file})"')
+        # Fallback: if no quotes were used, replace with file path
+        cmd = cmd.replace("{{task.prompt}}", str(prompt_file))
 
         # Save the full prompt as a comment
         try:
@@ -318,6 +326,33 @@ def create_app() -> FastAPI:
                     task.board_column = "blocked"
                     session.add(TaskComment(task_id=task_id, author="Soda",
                         content=f"⚠️ AI reported it's blocked:\n\n{blocked_reason}"))
+                    await session.commit()
+            return
+
+        # Check for execution errors (shell quoting, command not found, etc.)
+        stdout_text = ""
+        stderr_text = ""
+        if stdout_file.exists():
+            try:
+                stdout_text = stdout_file.read_text().strip()
+            except Exception:
+                pass
+        stderr_file = workdir / ".soda-stderr.log"
+        if stderr_file.exists():
+            try:
+                stderr_text = stderr_file.read_text().strip()
+            except Exception:
+                pass
+
+        if not stdout_text:
+            # No AI output at all — indicates execution error
+            error_detail = stderr_text[:2000] if stderr_text else "Unknown error (no output)"
+            async with async_session() as session:
+                task = await session.get(Task, task_id)
+                if task:
+                    task.board_column = "blocked"
+                    session.add(TaskComment(task_id=task_id, author="Soda",
+                        content=f"⚠️ **Execution error:** OpenCode did not produce any output.\n\n```\n{error_detail}\n```"))
                     await session.commit()
             return
 
