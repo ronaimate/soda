@@ -87,6 +87,7 @@ def create_app() -> FastAPI:
     def _write_opencode_auth(user: User) -> None:
         """Write AI user's API key and model to OpenCode auth.json.
         Falls back to global API key based on ai_provider setting."""
+        import json as _json
         auth_dir = OPENCODE_AUTH.parent
         auth_dir.mkdir(parents=True, exist_ok=True)
         auth_data = {}
@@ -95,17 +96,17 @@ def create_app() -> FastAPI:
         if user.provider:
             auth_data["provider"] = user.provider
         else:
-            # Infer provider from user model or global setting
+            # Infer provider from user model or global ai_provider setting
             if user.model and user.model.startswith("openrouter/"):
                 auth_data["provider"] = "openrouter"
         if user.model:
             auth_data["model"] = user.model
         # If user has no API key, don't overwrite auth.json — let the
-        # global OPENCODE_API_KEY env var (set by callers) handle auth.
+        # global API key handling in callers manage it.
         if not user.api_key:
             return
         with open(OPENCODE_AUTH, "w") as f:
-            json.dump(auth_data, f)
+            _json.dump(auth_data, f)
 
     # ── Helpers: get API key from settings ─────────────────
 
@@ -284,6 +285,10 @@ def create_app() -> FastAPI:
                     auth_data["model"] = assignee.model
                     if assignee.model.startswith("openrouter/"):
                         auth_data["provider"] = "openrouter"
+                if "provider" not in auth_data:
+                    ai_provider = await get_setting("ai_provider", "opencode")
+                    if ai_provider != "opencode":
+                        auth_data["provider"] = ai_provider
                 auth_data["apiKey"] = api_key
                 with open(OPENCODE_AUTH, "w") as f:
                     json.dump(auth_data, f)
@@ -1113,6 +1118,11 @@ def create_app() -> FastAPI:
                     auth_data["model"] = architect.model
                     if architect.model.startswith("openrouter/"):
                         auth_data["provider"] = "openrouter"
+                # Use global ai_provider setting if model doesn't specify provider
+                if "provider" not in auth_data:
+                    ai_provider = await get_setting("ai_provider", "opencode")
+                    if ai_provider != "opencode":
+                        auth_data["provider"] = ai_provider
                 auth_data["apiKey"] = api_key
                 with open(OPENCODE_AUTH, "w") as f:
                     json.dump(auth_data, f)
