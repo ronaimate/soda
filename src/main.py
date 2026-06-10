@@ -275,6 +275,18 @@ def create_app() -> FastAPI:
         if api_key:
             env["OPENCODE_API_KEY"] = api_key
             env["OPENROUTER_API_KEY"] = api_key
+            # Ensure auth.json has the key if user has no individual key
+            auth_dir = OPENCODE_AUTH.parent
+            auth_dir.mkdir(parents=True, exist_ok=True)
+            if not assignee.api_key:
+                auth_data = {}
+                if assignee.model:
+                    auth_data["model"] = assignee.model
+                    if assignee.model.startswith("openrouter/"):
+                        auth_data["provider"] = "openrouter"
+                auth_data["apiKey"] = api_key
+                with open(OPENCODE_AUTH, "w") as f:
+                    json.dump(auth_data, f)
 
         # Run OpenCode
         stdout_file = workdir / ".soda-stdout.log"
@@ -1091,6 +1103,19 @@ def create_app() -> FastAPI:
         if api_key:
             env["OPENCODE_API_KEY"] = api_key
             env["OPENROUTER_API_KEY"] = api_key
+            # Ensure auth.json always has the key, even if user has no individual key
+            auth_dir = OPENCODE_AUTH.parent
+            auth_dir.mkdir(parents=True, exist_ok=True)
+            if not architect.api_key:
+                # User has no individual key — write global key to auth.json
+                auth_data = {}
+                if architect.model:
+                    auth_data["model"] = architect.model
+                    if architect.model.startswith("openrouter/"):
+                        auth_data["provider"] = "openrouter"
+                auth_data["apiKey"] = api_key
+                with open(OPENCODE_AUTH, "w") as f:
+                    json.dump(auth_data, f)
 
         logger.info(f"Calling architect {architect.name} with prompt length: {len(prompt)}")
         
