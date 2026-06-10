@@ -1814,24 +1814,22 @@ Return ONLY valid JSON, no other text."""
                 repo.index.commit(commit_msg)
                 repo.git.push('origin', feature_branch)
 
-                # Create PR via GitHub API
-                pr_url = f"https://api.github.com/repos/{username}/{target_repo}/pulls"
-                pr_data = {
-                    "title": f"Task {task.id}: {task.title}",
-                    "head": feature_branch,
-                    "base": target_branch,
-                    "body": f"## Task {task.id}: {task.title}\n\n{task.description or 'No description'}\n\n**Complexity:** {task.complexity or 'N/A'}\n\n*Created by Soda*",
-                }
-                async with httpx.AsyncClient() as client:
-                    pr_resp = await client.post(pr_url, headers=headers, json=pr_data)
-                    if pr_resp.status_code in [200, 201]:
-                        pr_json = pr_resp.json()
-                        pr_html_url = pr_json.get("html_url", "")
-                        logger.info(f"Created PR: {pr_html_url}")
-                        return pr_html_url
-                    else:
-                        logger.error(f"PR creation failed: {pr_resp.text}")
-                        return None
+                # Create PR via GitHubService
+                github_service = GitHubService(username, token)
+                pr_result = await github_service.create_pull_request(
+                    repo_name=target_repo,
+                    title=f"Task {task.id}: {task.title}",
+                    head=feature_branch,
+                    base=target_branch,
+                    body=f"## Task {task.id}: {task.title}\n\n{task.description or 'No description'}\n\n**Complexity:** {task.complexity or 'N/A'}\n\n*Created by Soda*"
+                )
+                
+                if pr_result['success']:
+                    logger.info(f"Created PR: {pr_result['pr_url']}")
+                    return pr_result['pr_url']
+                else:
+                    logger.error(f"PR creation failed: {pr_result['error']}")
+                    return None
             else:
                 logger.info(f"No changes to commit for task {task.id}")
                 return None
