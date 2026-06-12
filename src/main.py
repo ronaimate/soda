@@ -287,25 +287,12 @@ def create_app() -> FastAPI:
             auth_repo_url = auth_repo_url.replace("http://github.com/", f"https://{git_username}:{git_token}@github.com/")
 
         # Create task workdir and clone repo
+        # IMPORTANT: do the git clone with a long timeout (180s) so large repos don't fail.
+        # Save prompt comment FIRST so user sees it immediately even if clone is slow.
         workdir_base = Path("/tmp/soda-task-workdirs")
         workdir_base.mkdir(parents=True, exist_ok=True)
         workdir = workdir_base / f"task-{task.id}"
         workdir.mkdir(parents=True, exist_ok=True)
-
-        if auth_repo_url:
-            import shutil
-            import subprocess as sp
-            try:
-                for item in workdir.iterdir():
-                    if item.is_dir():
-                        shutil.rmtree(item)
-                    else:
-                        item.unlink()
-                sp.run(["git", "clone", auth_repo_url, str(workdir)], check=True, capture_output=True, timeout=60)
-                sp.run(["git", "checkout", "main"], cwd=str(workdir), check=True, capture_output=True, timeout=30)
-                sp.run(["git", "pull", "origin", "main"], cwd=str(workdir), check=True, capture_output=True, timeout=30)
-            except Exception:
-                pass
 
         # Build the full prompt with context
         full_prompt = f"""You are working on a software project.
@@ -313,9 +300,9 @@ def create_app() -> FastAPI:
 ## Project: {project_name}
 
 ## Your Task (ONLY work on this):
-**Title:** {task.title}
-**Description:** {task.description or '(no description)'}
-**Complexity:** {task.complexity or 'not specified'}
+|**Title:** {task.title}
+|**Description:** {task.description or '(no description)'}
+|**Complexity:** {task.complexity or 'not specified'}
 
 ## Other tasks in this project (DO NOT work on these — they are separate tasks):
 {remaining_summary if remaining_summary else '(none)'}
@@ -338,23 +325,7 @@ def create_app() -> FastAPI:
         prompt_file = workdir / ".soda-prompt.txt"
         prompt_file.write_text(full_prompt)
 
-        # Resolve template variables
-        cmd = assignee.execute_command
-        cmd = cmd.replace("{{task.id}}", str(task.id))
-        cmd = cmd.replace("{{task.title}}", task.title or "")
-        cmd = cmd.replace("{{task.description}}", task.description or "")
-        cmd = cmd.replace("{{task.complexity}}", task.complexity or "")
-        cmd = cmd.replace("{{task.comments}}", json.dumps(comments))
-        cmd = cmd.replace("{{project.name}}", project_name)
-        cmd = cmd.replace("{{callback.url}}", callback_url)
-        cmd = cmd.replace("{{task.workdir}}", str(workdir))
-        # Replace {{task.prompt}} with file contents via shell substitution
-        # Removes surrounding single quotes too, so shell quoting doesn't break
-        cmd = cmd.replace("'{{task.prompt}}'", f'"$(cat {prompt_file})"')
-        # Fallback: if no quotes were used, replace with file path
-        cmd = cmd.replace("{{task.prompt}}", str(prompt_file))
-
-        # Save the full prompt as a comment
+        # ── Save the full prompt as a comment FIRST so user sees it immediately ──
         try:
             async with async_session() as prompt_session:
                 model_info = ""
@@ -362,10 +333,18 @@ def create_app() -> FastAPI:
                     model_info = f"\n\n**Model:** `{assignee.model}`"
                 if assignee.provider:
                     model_info += f" (provider: `{assignee.provider}`)"
+                # Also mark the start of the AI run
+                from datetime import datetime as _dt
+                start_msg = (
+                    f"📋 **Prompt sent to AI:**{model_info}\n\n"
+                    f"```\n{full_prompt}\n```\n\n"
+                    f"---\n⏱️ AI run started at {_dt.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC. "
+                    f"Watching process..."
+                )
                 prompt_session.add(TaskComment(
                     task_id=task.id,
                     author="Soda",
-                    content=f"📋 **Prompt sent to AI:**{model_info}\n\n```\n{full_prompt}\n```",
+                    content=start_msg,
                 ))
                 await prompt_session.commit()
                 logger.info(f"Task {task.id}: prompt comment saved to DB")
@@ -383,11 +362,55 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
 
+        # ── Now do the git clone (long timeout, may take 60-180s) ──
+        if auth_repo_url:
+            import shutil
+            import subprocess as sp
+            clone_error = None
+            try:
+                for item in workdir.iterdir():
+                    if item.is_dir() and not item.name.startswith(".soda"):
+                        shutil.rmtree(item)
+                    elif item.is_file() and not item.name.startswith(".soda"):
+                        item.unlink()
+                sp.run(["git", "clone", auth_repo_url, str(workdir)], check=True, capture_output=True, timeout=180)
+                sp.run(["git", "checkout", "main"], cwd=str(workdir), check=True, capture_output=True, timeout=30)
+                sp.run(["git", "pull", "origin", "main"], cwd=str(workdir), check=True, capture_output=True, timeout=30)
+            except Exception as e:
+                clone_error = str(e)[:500]
+                logger.warning(f"Task {task.id}: git clone failed: {clone_error}")
+                # Save a comment about the clone failure
+                try:
+                    async with async_session() as err_session:
+                        err_session.add(TaskComment(
+                            task_id=task.id,
+                            author="Soda",
+                            content=f"⚠️ Git clone failed (continuing with empty workdir): {clone_error}",
+                        ))
+                        await err_session.commit()
+                except Exception:
+                    pass
+
         # Build env
         env = os.environ.copy()
         if api_key:
             env["OPENCODE_API_KEY"] = api_key
             env["OPENROUTER_API_KEY"] = api_key
+
+        # Resolve template variables in execute_command
+        cmd = assignee.execute_command or ""
+        cmd = cmd.replace("{{task.id}}", str(task.id))
+        cmd = cmd.replace("{{task.title}}", task.title or "")
+        cmd = cmd.replace("{{task.description}}", task.description or "")
+        cmd = cmd.replace("{{task.complexity}}", task.complexity or "")
+        cmd = cmd.replace("{{task.comments}}", json.dumps(comments))
+        cmd = cmd.replace("{{project.name}}", project_name)
+        cmd = cmd.replace("{{callback.url}}", callback_url)
+        cmd = cmd.replace("{{task.workdir}}", str(workdir))
+        # Replace {{task.prompt}} with file contents via shell substitution
+        cmd = cmd.replace("'{{task.prompt}}'", f'"$(cat {prompt_file})"')
+        # Fallback: if no quotes were used, replace with file path
+        cmd = cmd.replace("{{task.prompt}}", str(prompt_file))
 
         # Run OpenCode
         stdout_file = workdir / ".soda-stdout.log"
@@ -2565,8 +2588,9 @@ Return ONLY valid JSON, no other text."""
     async def _watchdog_check():
         """Periodically check running tasks for stuck processes.
         Also cleans up stale ideas and running tasks."""
-        # Grace period: tasks started less than this many seconds ago are not checked
-        GRACE_PERIOD_SEC = 90
+        # Grace period: tasks started less than this many seconds ago are not checked.
+        # Must be > git clone timeout (180s) + a buffer for the AI process to start.
+        GRACE_PERIOD_SEC = 300  # 5 minutes
         while True:
             await asyncio.sleep(30)  # Check every 30 seconds
             try:
