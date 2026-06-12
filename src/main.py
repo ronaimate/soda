@@ -309,10 +309,15 @@ def create_app() -> FastAPI:
         # Save the full prompt as a comment
         try:
             async with async_session() as prompt_session:
+                model_info = ""
+                if assignee.model:
+                    model_info = f"\n\n**Model:** `{assignee.model}`"
+                if assignee.provider:
+                    model_info += f" (provider: `{assignee.provider}`)"
                 prompt_session.add(TaskComment(
                     task_id=task.id,
                     author="Soda",
-                    content=f"📋 **Prompt sent to AI:**\n\n{full_prompt}",
+                    content=f"📋 **Prompt sent to AI:**{model_info}\n\n```\n{full_prompt}\n```",
                 ))
                 await prompt_session.commit()
         except Exception:
