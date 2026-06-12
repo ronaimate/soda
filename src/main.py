@@ -1088,7 +1088,7 @@ def create_app() -> FastAPI:
             "status": i.status,
             "questions": questions,
             "created_at": str(i.created_at),
-            "project_id": None,
+            "project_id": i.project_id,
             "project_name": None,
         }
 
@@ -1503,7 +1503,8 @@ Return ONLY valid JSON, no other text."""
             repo_private=repo_private == "true",
         ))
 
-        return {"status": "generating", "idea_id": idea_id}
+        # Return current project_id (may be None for new ideas) so frontend can poll
+        return {"status": "generating", "idea_id": idea_id, "project_id": idea.project_id}
 
     async def _generate_project_background(
         idea_id: int,
@@ -1642,7 +1643,8 @@ Return ONLY valid JSON, no other text."""
             repo_private=True,
         ))
 
-        return {"status": "generating", "idea_id": idea_id}
+        # Return current project_id (may be None for new ideas) so frontend can poll
+        return {"status": "generating", "idea_id": idea_id, "project_id": idea.project_id}
 
     # ── API: Users ─────────────────────────────────────────────────
 

@@ -245,11 +245,17 @@ async function generateProject() {
 
         if (data.status === 'generating') {
             const result = await pollIdeaStatus(ideaId);
-            if (result === 'generated') {
-                window.location = `/project/${data.project_id || ''}`;
-            } else if (result === 'questions') {
+            if (result.status === 'generated') {
+                // Prefer project_id from poll (it has the latest value)
+                const pid = result.project_id || data.project_id;
+                if (pid) {
+                    window.location = `/project/${pid}`;
+                } else {
+                    window.location = '/';
+                }
+            } else if (result.status === 'questions') {
                 window.location.reload();
-            } else if (result === 'error') {
+            } else if (result.status === 'error') {
                 const ideaRes = await fetch(`/api/ideas`);
                 const ideas = await ideaRes.json();
                 const idea = ideas.find(i => i.id === parseInt(ideaId));
@@ -294,18 +300,18 @@ async function pollIdeaStatus(ideaId, maxAttempts = 60) {
             const res = await fetch(`/api/ideas`);
             const ideas = await res.json();
             const idea = ideas.find(i => i.id === parseInt(ideaId));
-            if (!idea) return 'error';
+            if (!idea) return { status: 'error' };
             if (idea.status === 'generated') {
                 statusText.textContent = 'Project created! Opening...';
-                return 'generated';
+                return { status: 'generated', project_id: idea.project_id };
             } else if (idea.status === 'active' && idea.questions && idea.questions.length > 0) {
                 try {
                     const q = JSON.parse(idea.questions);
-                    if (q.error) return 'error';
+                    if (q.error) return { status: 'error' };
                 } catch(e) {}
-                return 'questions';
+                return { status: 'questions' };
             } else if (idea.status === 'error') {
-                return 'error';
+                return { status: 'error' };
             }
             const elapsed = (i + 1) * 3;
             statusText.textContent = 'Architect is working...';
@@ -314,7 +320,7 @@ async function pollIdeaStatus(ideaId, maxAttempts = 60) {
             console.error('Poll error:', e);
         }
     }
-    return 'timeout';
+    return { status: 'timeout' };
 }
 
 async function submitAnswers(ideaId) {
@@ -346,11 +352,17 @@ async function submitAnswers(ideaId) {
         if (data.status === 'generating') {
             const result = await pollIdeaStatus(ideaId);
             overlay.style.display = 'none';
-            if (result === 'generated') {
+            if (result.status === 'generated') {
+                // Jump to the new project
+                const pid = result.project_id || data.project_id;
+                if (pid) {
+                    window.location = `/project/${pid}`;
+                } else {
+                    window.location.reload();
+                }
+            } else if (result.status === 'questions') {
                 window.location.reload();
-            } else if (result === 'questions') {
-                window.location.reload();
-            } else if (result === 'error') {
+            } else if (result.status === 'error') {
                 const ideaRes = await fetch(`/api/ideas`);
                 const ideas = await ideaRes.json();
                 const idea = ideas.find(i => i.id === parseInt(ideaId));
