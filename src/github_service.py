@@ -127,6 +127,7 @@ class GitHubService:
     ) -> Dict[str, Any]:
         """
         Create a pull request.
+
         
         Args:
             repo_name: Repository name
@@ -277,6 +278,58 @@ logs/
                 logger.error(f"Error committing .gitignore: {e}")
                 return False
 
+    async def merge_branch(self, repo_name: str, head: str, base: str = "main") -> Dict[str, Any]:
+        """
+        Merge a branch into the base branch using GitHub's merge API.
+        Returns: {"status": "merged" | "conflict" | "error", "message": str, "data": ...}
+        """
+        url = f"{self.GITHUB_API_URL}/repos/{self.username}/{repo_name}/merges"
+        payload = {
+            "base": base,
+            "head": head,
+            "commit_message": f"Merge branch '{head}' into {base}",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(url, json=payload, headers=self.headers)
+                if response.status_code in (200, 201):
+                    return {"status": "merged", "data": response.json()}
+                elif response.status_code == 409:
+                    try:
+                        err = response.json()
+                    except Exception:
+                        err = {"message": response.text}
+                    return {
+                        "status": "conflict",
+                        "message": err.get("message", "Merge conflict"),
+                    }
+                elif response.status_code == 404:
+                    return {"status": "error", "message": f"Branch not found: {head}"}
+                elif response.status_code == 422:
+                    try:
+                        err = response.json()
+                    except Exception:
+                        err = {"message": response.text}
+                    msg = err.get("message", "Merge failed")
+                    if "no commits" in msg.lower() or "already" in msg.lower():
+                        return {"status": "merged", "message": msg, "data": err}
+                    return {"status": "conflict", "message": msg}
+                else:
+                    try:
+                        err = response.json()
+                    except Exception:
+                        err = {"message": response.text}
+                    return {
+                        "status": "error",
+                        "message": err.get("message", f"HTTP {response.status_code}"),
+                    }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    async def close(self) -> None:
+        """No-op for backward compatibility."""
+        pass
+
 
 class GitOperations:
     """Service for local git operations."""
@@ -386,3 +439,57 @@ class GitOperations:
                 shutil.copytree(item, dest_item)
             else:
                 shutil.copy2(item, dest_item)
+
+    async def merge_branch(self, head: str, base: str = "main") -> Dict[str, Any]:
+        """
+        Merge a branch into the base branch using GitHub's merge API.
+        Returns: {"status": "merged" | "conflict" | "error", "message": str, "data": ...}
+        """
+        try:
+            url = f"{self.api_base}/repos/{self.username}/{self.repo}/merges"
+            payload = {
+                "base": base,
+                "head": head,
+                "commit_message": f"Merge branch '{head}' into {base}",
+            }
+            resp = await self.client.post(url, json=payload)
+            if resp.status_code in (200, 201):
+                return {"status": "merged", "data": resp.json()}
+            elif resp.status_code == 409:
+                # Conflict or branch protection
+                try:
+                    err = resp.json()
+                except Exception:
+                    err = {"message": resp.text}
+                return {
+                    "status": "conflict",
+                    "message": err.get("message", "Merge conflict"),
+                }
+            elif resp.status_code == 404:
+                return {"status": "error", "message": f"Branch not found: {head}"}
+            elif resp.status_code == 422:
+                # Could be: head == base, no commits between, or branch protection
+                try:
+                    err = resp.json()
+                except Exception:
+                    err = {"message": resp.text}
+                msg = err.get("message", "Merge failed")
+                # "already up to date" or "no commits" - treat as success
+                if "no commits" in msg.lower() or "already" in msg.lower():
+                    return {"status": "merged", "message": msg, "data": err}
+                return {"status": "conflict", "message": msg}
+            else:
+                try:
+                    err = resp.json()
+                except Exception:
+                    err = {"message": resp.text}
+                return {
+                    "status": "error",
+                    "message": err.get("message", f"HTTP {resp.status_code}"),
+                }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self.client.aclose()

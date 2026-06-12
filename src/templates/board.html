@@ -6,10 +6,12 @@
         <div class="header-actions">
             <button class="btn btn-sm" onclick="showEditProject()">⚙ Edit</button>
             <button class="btn btn-primary btn-sm" onclick="showCreateTask()">+ Task</button>
+            <button class="btn btn-sm" style="background:#ef4444" onclick="showCreateBug()">🐛 Bug</button>
             <button class="btn btn-sm btn-danger" onclick="deleteProject({{ project.id }})">🗑 Delete</button>
         </div>
     </div>
     {% if project.description %}<p class="project-desc">{{ project.description }}</p>{% endif %}
+    {% if project.repo_name %}<p class="help-text">📦 Repo: <code>{{ project.repo_name }}</code> | Branch: <code>{{ project.repo_default_branch or 'main' }}</code></p>{% endif %}
 </div>
 
 <div class="board" id="board">
@@ -19,7 +21,7 @@
             <h3>
                 {% if col == 'backlog' %}📋 Backlog
                 {% elif col == 'running' %}▶️ Running
-                {% elif col == 'blocked' %}🚫 Blocked
+                {% elif col == 'blocked' %}❓ Blocked
                 {% elif col == 'review' %}👁️ Review
                 {% elif col == 'done' %}✅ Done
                 {% endif %}
@@ -28,13 +30,17 @@
         </div>
         <div class="card-list" data-column="{{ col }}" ondrop="drop(event)" ondragover="allowDrop(event)">
             {% for task in tasks if task.board_column == col %}
-            <div class="task-card {% if not task.assignee_id %}task-unassigned{% endif %} {% if task.has_unmet_deps %}task-blocked-dep{% endif %} {% if task.is_running %}running-task{% endif %}" 
-                 draggable="{% if not task.has_unmet_deps %}true{% else %}false{% endif %}" 
-                 ondragstart="drag(event)" 
-                 data-task-id="{{ task.id }}" 
+            <div class="task-card {% if not task.assignee_id %}task-unassigned{% endif %} {% if task.is_bug %}task-bug{% endif %} {% if task.is_running %}running-task{% endif %}"
+                 draggable="true"
+                 ondragstart="drag(event)"
+                 data-task-id="{{ task.id }}"
                  onclick="showTaskDetail({{ task.id }})">
                 <div class="card-header">
-                    <span class="card-title">{% if task.is_running %}<span class="sand-clock" title="In progress">⏳</span> {% endif %}{{ task.title }}</span>
+                    <span class="card-title">
+                        {% if task.is_running %}<span class="sand-clock" title="In progress">⏳</span> {% endif %}
+                        {% if task.is_bug %}<span title="Bug">🐛</span> {% endif %}
+                        {{ task.title }}
+                    </span>
                 </div>
                 {% if task.complexity %}
                 <span class="badge complexity-{{ task.complexity|lower }}">{{ task.complexity }}</span>
@@ -47,9 +53,6 @@
                     {% endif %}
                     {% else %}
                     <span class="assignee-badge unassigned" title="No assignee">—</span>
-                    {% endif %}
-                    {% if task.has_unmet_deps %}
-                    <span class="dep-badge" title="Waiting on dependencies">⏳</span>
                     {% endif %}
                 </div>
             </div>
@@ -77,11 +80,11 @@
             <input type="text" name="name" value="{{ project.name }}" required>
             <label>Description</label>
             <textarea name="description">{{ project.description or '' }}</textarea>
-            <label>Review User (AI)</label>
-            <select name="review_user_id">
+            <label>Merger (handles PRs/review)</label>
+            <select name="merger_user_id">
                 <option value="">None</option>
-                {% for u in users if u.type == 'ai' %}
-                <option value="{{ u.id }}" {% if project.review_user_id == u.id %}selected{% endif %}>{{ u.name }}</option>
+                {% for u in users if 'merger' in (u.task_types or []) %}
+                <option value="{{ u.id }}" {% if project.merger_user_id == u.id %}selected{% endif %}>{{ u.name }}</option>
                 {% endfor %}
             </select>
             <button type="submit" class="btn btn-primary">Save</button>
@@ -99,54 +102,123 @@
             <input type="text" name="title" required>
             <label>Description</label>
             <textarea name="description" rows="4"></textarea>
-            <label>Assignee</label>
+            <label>Complexity</label>
+            <select name="complexity" onchange="updateAssigneeHint()">
+                <option value="">None</option>
+                <option value="XS">XS — small, Junior dev</option>
+                <option value="S">S — small, Junior dev</option>
+                <option value="M">M — medium, Medior dev</option>
+                <option value="L">L — large, Medior dev</option>
+                <option value="XL">XL — extra large, Senior dev</option>
+            </select>
+            <p class="help-text" id="assignee-hint">Pick a complexity to auto-assign.</p>
+            <label>Assignee (override)</label>
             <select name="assignee_id">
-                <option value="">Unassigned</option>
+                <option value="">Auto (based on complexity)</option>
                 {% for u in users %}
                 <option value="{{ u.id }}">{{ u.name }} ({{ u.type }})</option>
                 {% endfor %}
             </select>
-            <label>Complexity</label>
+            <button type="submit" class="btn btn-primary" style="margin-top:16px">Create</button>
+        </form>
+    </div>
+</div>
+
+<!-- Create Bug Modal -->
+<div id="create-bug-modal" class="modal" style="display:none">
+    <div class="modal-content">
+        <span class="modal-close" onclick="closeModal('create-bug-modal')">&times;</span>
+        <h2>🐛 Report a Bug</h2>
+        <form onsubmit="return createBug(event)">
+            <label>Bug Title</label>
+            <input type="text" name="title" required placeholder="e.g. Login button doesn't work">
+            <label>Description (what's broken?)</label>
+            <textarea name="description" rows="3" placeholder="Describe the bug..."></textarea>
+            <label>Reproduction Questions</label>
+            <p class="help-text" style="margin-bottom:8px">Add clarifying questions to help developers reproduce the bug.</p>
+            <div id="bug-questions-list"></div>
+            <button type="button" class="btn btn-sm" onclick="addBugQuestion()">+ Add Question</button>
+            <label style="margin-top:16px">Complexity (auto-assigns developer)</label>
             <select name="complexity">
-                <option value="">None</option>
-                <option value="XS">XS</option>
-                <option value="S">S</option>
+                <option value="S" selected>S</option>
                 <option value="M">M</option>
                 <option value="L">L</option>
                 <option value="XL">XL</option>
+                <option value="XS">XS</option>
             </select>
-            <button type="submit" class="btn btn-primary">Create</button>
+            <input type="hidden" name="is_bug" value="true">
+            <button type="submit" class="btn btn-primary" style="margin-top:16px; background:#ef4444">Report Bug</button>
         </form>
     </div>
 </div>
 
-<!-- Git Commit Modal -->
-<div id="git-commit-modal" class="modal" style="display:none">
+<!-- Merge Modal -->
+<div id="merge-modal" class="modal" style="display:none">
     <div class="modal-content">
-        <span class="modal-close" onclick="closeModal('git-commit-modal')">&times;</span>
-        <h2>📦 Commit & Push</h2>
-        <form onsubmit="return gitCommitPush(event)">
-            <label>Commit Message</label>
-            <textarea name="commit_message" rows="3" required>Task {{ taskId }} completed</textarea>
-            
-            <label>Repository (optional - leave empty for default)</label>
-            <input type="text" name="repo_override" placeholder="owner/repo">
-            
-            <label>Branch (optional - leave empty for default)</label>
-            <input type="text" name="branch_override" placeholder="main">
-            
-            <div class="git-status" id="git-status"></div>
-            
-            <button type="submit" class="btn btn-primary">Commit & Push</button>
-            <button type="button" class="btn btn-secondary" onclick="closeModal('git-commit-modal')">Cancel</button>
+        <span class="modal-close" onclick="closeModal('merge-modal')">&times;</span>
+        <h2>🔀 Merge to Main</h2>
+        <form onsubmit="return doMerge(event)">
+            <input type="hidden" id="merge-task-id" value="">
+            <p class="help-text">This will merge the task's branch into the project's main branch.</p>
+            <label>Comment (optional)</label>
+            <textarea name="comment" rows="3" placeholder="Notes about this merge..."></textarea>
+            <label>If merge fails, move task to:</label>
+            <select name="move_back_to">
+                <option value="blocked">Blocked (default)</option>
+                <option value="running">Running (retry)</option>
+            </select>
+            <button type="submit" class="btn btn-primary" style="margin-top:12px">Merge</button>
         </form>
     </div>
 </div>
+
+<style>
+.task-bug { border-left: 3px solid #ef4444 !important; }
+.complexity-xs, .complexity-s { background: #22c55e; color: white; }
+.complexity-m, .complexity-l { background: #f59e0b; color: white; }
+.complexity-xl { background: #ef4444; color: white; }
+.prompt-comment { background: #1e3a5f !important; border-left: 3px solid #3b82f6 !important; }
+.ai-summary-comment { background: #1a3a2a !important; border-left: 3px solid #10b981 !important; }
+.error-comment { background: #3a1a1a !important; border-left: 3px solid #ef4444 !important; }
+.user-comment { background: var(--bg2) !important; }
+</style>
 
 <script>
-// ── Drag & Drop ──────────────────────────────────────
-function allowDrop(e) { e.preventDefault(); }
+function showCreateTask() {
+    document.getElementById('create-task-modal').style.display = 'flex';
+    updateAssigneeHint();
+}
+function showCreateBug() {
+    document.getElementById('create-bug-modal').style.display = 'flex';
+    document.getElementById('bug-questions-list').innerHTML = '';
+    addBugQuestion();
+}
+function addBugQuestion() {
+    const list = document.getElementById('bug-questions-list');
+    const idx = list.children.length;
+    const div = document.createElement('div');
+    div.style.cssText = 'display:flex; gap:4px; margin-bottom:4px;';
+    div.innerHTML = `<input type="text" class="bug-q" placeholder="Question ${idx+1}..." style="flex:1">
+        <button type="button" onclick="this.parentElement.remove()" style="background:#ef4444; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer;">×</button>`;
+    list.appendChild(div);
+}
 
+async function updateAssigneeHint() {
+    const complexity = document.querySelector('#create-task-modal select[name="complexity"]').value;
+    const hint = document.getElementById('assignee-hint');
+    if (!complexity) { hint.textContent = 'Pick a complexity to auto-assign.'; return; }
+    try {
+        const res = await fetch('/api/sizes');
+        const data = await res.json();
+        const size = data.sizes[complexity.toLowerCase()];
+        if (size) hint.textContent = `Will be assigned to: ${size.user_name}`;
+        else hint.textContent = 'No user assigned to this complexity.';
+    } catch (e) {
+        hint.textContent = 'Could not load assignee info.';
+    }
+}
+
+function allowDrop(e) { e.preventDefault(); }
 function drag(e) {
     e.dataTransfer.setData('taskId', e.currentTarget.dataset.taskId);
     e.dataTransfer.effectAllowed = 'move';
@@ -157,133 +229,137 @@ async function drop(e) {
     const taskId = e.dataTransfer.getData('taskId');
     const column = e.currentTarget.dataset.column;
     if (!taskId || !column) return;
-
-    // Check if task has an assignee before allowing move
-    const taskRes = await fetch(`/api/tasks/${taskId}`);
-    const task = await taskRes.json();
-    if (!task.assignee_id) {
-        alert('⚠️ Please assign a user to this task before moving it.');
-        return;
-    }
-
-    // Check if moving to running — only one task allowed in progress at a time
-    if (column === 'running') {
-        const projectRes = await fetch(`/api/projects/${task.project_id}/tasks`);
-        const allTasks = await projectRes.json();
-        const runningTask = allTasks.find(t => t.column === 'running');
-        if (runningTask && runningTask.id !== parseInt(taskId)) {
-            alert('⚠️ Another task is already in progress. This feature does not support parallel task execution yet. Please complete or move the current task first.');
-            return;
-        }
-    }
-
-    const res = await fetch(`/api/tasks/${taskId}/move`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({column})
-    });
-    if (res.ok) window.location.reload();
+    await moveTaskAction(taskId, column);
 }
 
-// ── Task Detail ──────────────────────────────────────
+async function moveTaskAction(taskId, column) {
+    try {
+        const res = await fetch(`/api/tasks/${taskId}/move`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({column})
+        });
+        if (res.ok) {
+            window.location.reload();
+        } else {
+            const err = await res.json();
+            alert('Error: ' + (err.detail || 'Failed to move'));
+        }
+    } catch (e) {
+        alert('Network error: ' + e.message);
+    }
+}
+
 async function showTaskDetail(taskId) {
     const res = await fetch(`/api/tasks/${taskId}`);
     const task = await res.json();
     const modal = document.getElementById('task-modal');
     const content = document.getElementById('task-detail-content');
 
-    // Build dependency list HTML
-    let depsHtml = '';
-    if (task.depends_on && task.depends_on.length > 0) {
-        const depPromises = task.depends_on.map(depId => fetch(`/api/tasks/${depId}`).then(r => r.json()));
-        const depTasks = await Promise.all(depPromises);
-        depsHtml = '<div style="display:flex; flex-direction:column; gap:4px; margin:6px 0;">';
-        for (const dt of depTasks) {
-            const isDone = dt.column === 'done';
-            const color = isDone ? 'var(--green)' : 'var(--red)';
-            const icon = isDone ? '✅' : '🔴';
-            depsHtml += `<div style="display:flex; align-items:center; gap:6px; padding:4px 8px; background:var(--bg); border-radius:4px; border-left:3px solid ${color};">
-                <span>${icon}</span>
-                <span style="flex:1; font-size:0.85em;">${dt.title}</span>
-                <span class="badge" style="font-size:0.65em; background:${isDone?'var(--green)':'var(--red)'}; color:#000;">${dt.column}</span>
-                <button onclick="removeTaskDependency(${taskId}, ${dt.id})" style="background:none; border:none; color:var(--red); cursor:pointer; font-size:0.8em;" title="Remove dependency">✕</button>
-            </div>`;
-        }
-        depsHtml += '</div>';
-    } else {
-        depsHtml = '<span class="help-text" style="display:block; margin:6px 0;">No dependencies — task can be started anytime</span>';
-    }
-
-    // Build dependency select options (all tasks in project except this one and current deps)
-    const allTasksRes = await fetch(`/api/projects/${task.project_id}/tasks`);
-    const allTasks = await allTasksRes.json();
-    const depSelectOptions = allTasks
-        .filter(t => t.id !== taskId && !(task.depends_on || []).includes(t.id))
-        .map(t => `<option value="${t.id}">${t.title}</option>`)
-        .join('');
-
     let html = `<div class="task-detail">
-        <h2>${task.title}</h2>
+        <h2>${task.is_bug ? '🐛 ' : ''}${task.title}</h2>
         <div class="task-meta">
             <span class="badge column-${task.column}">${task.column}</span>
             <span class="badge complexity-${(task.complexity||'').toLowerCase()}">${task.complexity || 'N/A'}</span>
+            ${task.is_bug ? '<span class="badge" style="background:#ef4444">BUG</span>' : ''}
         </div>
-        ${task.description ? `<div class="task-description"><p>${task.description}</p></div>` : ''}
+        ${task.description ? `<div class="task-description"><p>${task.description.replace(/\\n/g, '<br>')}</p></div>` : ''}
         <div class="task-assignee-section">
             <label><strong>Assignee:</strong></label>
             <select id="task-assignee-select" onchange="updateTaskAssignee(${taskId}, this.value)">
-                <option value="">— Unassigned —</option>
-                {% for u in users %}
-                <option value="{{ u.id }}" ${task.assignee_id == {{ u.id }} ? 'selected' : ''}>{{ u.name }} ({{ u.type }})</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div class="task-dependencies" style="margin-bottom:16px; padding:10px 12px; background:var(--bg); border-radius:var(--radius); border:1px solid var(--border);">
-            <label><strong>⏳ Dependencies (must be done before this task):</strong></label>
-            <div id="task-deps-list" style="margin-top:6px;">${depsHtml}</div>
-            <select id="add-dep-select" onchange="addTaskDependency(${taskId}, this.value)" style="margin-top:8px;">
-                <option value="">+ Add dependency...</option>
-                ${depSelectOptions}
-            </select>
-        </div>
-        <div class="task-comments">
-            <h4>Comments & AI Output</h4>
-            <div class="comments-list">`;
-
-    if (!task.comments || task.comments.length === 0) {
-        html += `<p class="help-text">No comments yet.</p>`;
+                <option value="">— Unassigned —</option>`;
+    for (const u of (window._users || [])) {
+        const sel = task.assignee_id === u.id ? 'selected' : '';
+        html += `<option value="${u.id}" ${sel}>${u.name} (${u.type})</option>`;
     }
+    html += `</select></div>`;
 
+    // Comments with prompt + AI summary distinction
+    html += `<div class="task-comments">
+        <h4>💬 Comments & AI Conversation</h4>
+        <div class="comments-list">`;
+    if (!task.comments || task.comments.length === 0) {
+        html += `<p class="help-text">No comments yet. Drag the task to "Running" to start the AI.</p>`;
+    }
     for (const c of (task.comments || [])) {
-        const isAI = c.author === 'AI' || c.author.includes('AI');
-        html += `<div class="comment ${isAI ? 'comment-ai' : ''}">
+        let cls = 'user-comment';
+        if (c.author === 'AI' || c.author.includes('AI') || c.author.includes('Summary')) cls = 'ai-summary-comment';
+        if (c.content.startsWith('[PROMPT]')) cls = 'prompt-comment';
+        if (c.content.startsWith('[ERROR]')) cls = 'error-comment';
+        const display = c.content
+            .replace(/^\[PROMPT\] ?/, '')
+            .replace(/^\[ERROR\] ?/, '')
+            .replace(/\\n/g, '<br>');
+        html += `<div class="comment ${cls}" style="padding:8px 12px; margin-bottom:8px; border-radius:6px;">
             <strong>${c.author}</strong>
-            <p>${c.content.replace(/\n/g, '<br>')}</p>
+            <p>${display}</p>
             <small>${c.created_at}</small>
         </div>`;
     }
-
     html += `</div>
-            <form class="comment-form" onsubmit="return addComment(event, ${taskId})">
-                <textarea name="content" placeholder="Add a comment..." required></textarea>
-                <input type="hidden" name="author" value="user">
-                <button type="submit" class="btn btn-sm btn-primary">Send</button>
-            </form>
-        </div>
-        <div class="task-actions">
-            <button class="btn btn-sm" onclick="moveTask(${taskId}, 'backlog')">← Backlog</button>
-            <button class="btn btn-sm" onclick="moveTask(${taskId}, 'running')">▶ Running</button>
-            <button class="btn btn-sm" onclick="moveTask(${taskId}, 'blocked')">🚫 Blocked</button>
-            <button class="btn btn-sm" onclick="moveTask(${taskId}, 'review')">👁 Review</button>
-            <button class="btn btn-sm btn-success" onclick="moveTask(${taskId}, 'done')">✓ Done</button>
-            <button class="btn btn-sm btn-danger" onclick="deleteTask(${taskId})">🗑 Delete</button>
-            ${task.column === 'running' ? `<button class="btn btn-sm btn-warning" onclick="killTaskProcess(${taskId})" style="margin-left:8px;">⏹ Kill Process</button>` : ''}
-            ${task.column === 'done' ? `<button class="btn btn-sm btn-success" onclick="showGitCommitModal(${taskId})">📦 Commit & Push</button>` : ''}
-        </div>
+        <form class="comment-form" onsubmit="return addComment(event, ${taskId})">
+            <textarea name="content" placeholder="Add a comment..." required></textarea>
+            <input type="hidden" name="author" value="user">
+            <button type="submit" class="btn btn-sm btn-primary">Send</button>
+        </form>
     </div>`;
 
+    // Action buttons based on column
+    html += `<div class="task-actions" style="margin-top:16px; display:flex; flex-wrap:wrap; gap:8px;">
+        <button class="btn btn-sm" onclick="moveTaskAction(${taskId}, 'backlog'); event.stopPropagation();">← Backlog</button>
+        <button class="btn btn-sm" onclick="moveTaskAction(${taskId}, 'running'); event.stopPropagation();">▶ Running</button>
+        <button class="btn btn-sm" onclick="moveTaskAction(${taskId}, 'blocked'); event.stopPropagation();">❓ Blocked</button>
+        <button class="btn btn-sm" onclick="moveTaskAction(${taskId}, 'review'); event.stopPropagation();">👁 Review</button>
+        <button class="btn btn-sm btn-success" onclick="moveTaskAction(${taskId}, 'done'); event.stopPropagation();">✓ Done</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteTask(${taskId}); event.stopPropagation();">🗑 Delete</button>`;
+    if (task.column === 'review') {
+        html += `<button class="btn btn-sm" style="background:#8b5cf6" onclick="showMergeModal(${taskId}); event.stopPropagation();">🔀 Merge</button>`;
+    }
+    if (task.column === 'blocked') {
+        html += `<button class="btn btn-sm" style="background:#10b981" onclick="moveTaskAction(${taskId}, 'running'); event.stopPropagation();">↻ Re-run with answers</button>`;
+    }
+    html += `</div></div>`;
     content.innerHTML = html;
     modal.style.display = 'flex';
+}
+
+function showMergeModal(taskId) {
+    document.getElementById('merge-task-id').value = taskId;
+    document.getElementById('merge-modal').style.display = 'flex';
+}
+
+async function doMerge(e) {
+    e.preventDefault();
+    const taskId = document.getElementById('merge-task-id').value;
+    const fd = new FormData(e.target);
+    const comment = fd.get('comment') || '';
+    const moveBackTo = fd.get('move_back_to') || 'blocked';
+    try {
+        const res = await fetch(`/api/tasks/${taskId}/merge`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({comment, move_back_to: moveBackTo})
+        });
+        const data = await res.json();
+        if (res.ok && data.merged) {
+            alert('✅ Merged successfully!');
+            closeModal('merge-modal');
+            closeModal('task-modal');
+            window.location.reload();
+        } else if (data.merged === false && data.note) {
+            alert('⚠️ ' + data.note);
+            closeModal('merge-modal');
+            closeModal('task-modal');
+            window.location.reload();
+        } else {
+            alert('❌ ' + (data.error || 'Merge failed'));
+            closeModal('merge-modal');
+            window.location.reload();
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+    }
+    return false;
 }
 
 async function addComment(e, taskId) {
@@ -302,65 +378,28 @@ async function addComment(e, taskId) {
 async function updateTaskAssignee(taskId, assigneeId) {
     const fd = new FormData();
     fd.append('assignee_id', assigneeId);
-    const res = await fetch(`/api/tasks/${taskId}`, {
-        method: 'PATCH',
-        body: fd
-    });
-    if (!res.ok) {
-        alert('Failed to update assignee');
-    }
+    await fetch(`/api/tasks/${taskId}`, { method: 'PATCH', body: fd });
 }
 
-async function addTaskDependency(taskId, dependsOnId) {
-    if (!dependsOnId) return;
-    const res = await fetch(`/api/tasks/${taskId}/dependencies`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({depends_on_id: parseInt(dependsOnId)})
-    });
-    if (res.ok) {
-        showTaskDetail(taskId);
-    } else {
-        const err = await res.json();
-        alert('Error: ' + (err.detail || 'Failed to add dependency'));
-    }
+async function createTask(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    fd.append('project_id', {{ project.id }});
+    const res = await fetch(`/api/projects/{{ project.id }}/tasks`, { method: 'POST', body: fd });
+    if (res.ok) { closeModal('create-task-modal'); window.location.reload(); }
+    return false;
 }
 
-async function removeTaskDependency(taskId, dependsOnId) {
-    const res = await fetch(`/api/tasks/${taskId}/dependencies/${dependsOnId}`, {
-        method: 'DELETE'
-    });
-    if (res.ok) {
-        showTaskDetail(taskId);
-    }
-}
-
-async function moveTask(taskId, column) {
-    // Check if moving to running — only one task allowed in progress at a time
-    if (column === 'running') {
-        const taskRes = await fetch(`/api/tasks/${taskId}`);
-        const task = await taskRes.json();
-        const projectRes = await fetch(`/api/projects/${task.project_id}/tasks`);
-        const allTasks = await projectRes.json();
-        const runningTask = allTasks.find(t => t.column === 'running');
-        if (runningTask && runningTask.id !== parseInt(taskId)) {
-            alert('⚠️ Another task is already in progress. This feature does not support parallel task execution yet. Please complete or move the current task first.');
-            return;
-        }
-    }
-
-    const res = await fetch(`/api/tasks/${taskId}/move`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({column})
-    });
-    if (res.ok) {
-        closeModal('task-modal');
-        window.location.reload();
-    } else {
-        const err = await res.json();
-        alert('Error: ' + (err.detail || 'Failed to move task'));
-    }
+async function createBug(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    fd.append('project_id', {{ project.id }});
+    // Collect questions
+    const questions = [...document.querySelectorAll('.bug-q')].map(i => i.value.trim()).filter(v => v);
+    if (questions.length) fd.append('questions', JSON.stringify(questions));
+    const res = await fetch(`/api/projects/{{ project.id }}/tasks`, { method: 'POST', body: fd });
+    if (res.ok) { closeModal('create-bug-modal'); window.location.reload(); }
+    return false;
 }
 
 async function deleteTask(taskId) {
@@ -371,41 +410,11 @@ async function deleteTask(taskId) {
 }
 
 async function deleteProject(projectId) {
-    if (!confirm('⚠️ Delete this project and ALL its tasks? This cannot be undone.')) return;
-    const res = await fetch(`/api/projects/${projectId}`, { method: 'DELETE' });
-    if (res.ok) {
-        window.location = '/';
-    } else {
-        const err = await res.json();
-        alert('Error: ' + (err.detail || 'Failed to delete project'));
-    }
+    if (!confirm('⚠️ Delete this project and ALL its tasks?')) return;
+    await fetch(`/api/projects/${projectId}`, { method: 'DELETE' });
+    window.location = '/';
 }
 
-async function killTaskProcess(taskId) {
-    if (!confirm('⚠️ Kill the running process for this task? This will move the task to blocked.')) return;
-    const res = await fetch(`/api/tasks/${taskId}/kill`, { method: 'POST' });
-    if (res.ok) {
-        closeModal('task-modal');
-        window.location.reload();
-    } else {
-        const err = await res.json();
-        alert('Error: ' + (err.detail || 'Failed to kill process'));
-    }
-}
-
-// ── Create Task ──────────────────────────────────────
-async function createTask(e) {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    fd.append('project_id', {{ project.id }});
-    const res = await fetch(`/api/projects/{{ project.id }}/tasks`, {
-        method: 'POST', body: fd
-    });
-    if (res.ok) { closeModal('create-task-modal'); window.location.reload(); }
-    return false;
-}
-
-// ── Edit Project ──────────────────────────────────────
 function showEditProject() {
     document.getElementById('edit-project-modal').style.display = 'flex';
 }
@@ -413,108 +422,32 @@ function showEditProject() {
 async function updateProject(e) {
     e.preventDefault();
     const fd = new FormData(e.target);
-    await fetch(`/api/projects/{{ project.id }}`, {
-        method: 'PATCH', body: fd
-    });
+    await fetch(`/api/projects/{{ project.id }}`, { method: 'PATCH', body: fd });
     closeModal('edit-project-modal');
     window.location.reload();
+    return false;
 }
 
-// ── Utility ──────────────────────────────────────────
 function closeModal(id) {
     document.getElementById(id).style.display = 'none';
 }
 document.querySelectorAll('.modal').forEach(m => {
-    m.addEventListener('click', e => {
-        if (e.target === m) m.style.display = 'none';
-    });
+    m.addEventListener('click', e => { if (e.target === m) m.style.display = 'none'; });
 });
 
-// ── Auto Refresh ─────────────────────────────────────
-let refreshInterval = null;
+// Load users for assignee select
+window._users = [];
+fetch('/api/users').then(r => r.json()).then(us => { window._users = us; });
 
+// Auto-refresh
+let refreshInterval = null;
 function startAutoRefresh() {
     if (refreshInterval) clearInterval(refreshInterval);
     refreshInterval = setInterval(() => {
-        // Only refresh if no modal is open
         const openModal = document.querySelector('.modal[style*="flex"]');
-        if (!openModal) {
-            refreshBoard();
-        }
-    }, 5000); // 5 seconds
+        if (!openModal) location.reload();
+    }, 8000);
 }
-
-async function refreshBoard() {
-    try {
-        const res = await fetch(window.location.href);
-        const text = await res.text();
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(text, 'text/html');
-        
-        // Update each column's card list
-        const columns = ['backlog', 'running', 'blocked', 'review', 'done'];
-        for (const col of columns) {
-            const newCol = doc.querySelector(`.card-list[data-column="${col}"]`);
-            const curCol = document.querySelector(`.card-list[data-column="${col}"]`);
-            if (newCol && curCol) {
-                curCol.innerHTML = newCol.innerHTML;
-            }
-            // Update task count
-            const newHeader = doc.querySelector(`.column[data-column="${col}"] .task-count`);
-            const curHeader = document.querySelector(`.column[data-column="${col}"] .task-count`);
-            if (newHeader && curHeader) {
-                curHeader.textContent = newHeader.textContent;
-            }
-        }
-    } catch (e) {
-        // Silently fail — will retry next interval
-    }
-}
-
-// Start auto-refresh when page loads
 startAutoRefresh();
-
-// ── Git Commit & Push ─────────────────────────────────
-function showGitCommitModal(taskId) {
-    document.getElementById('git-commit-modal').dataset.taskId = taskId;
-    document.getElementById('git-commit-modal').style.display = 'flex';
-}
-
-async function gitCommitPush(e) {
-    e.preventDefault();
-    const modal = document.getElementById('git-commit-modal');
-    const taskId = modal.dataset.taskId;
-    const fd = new FormData(e.target);
-    
-    const statusDiv = document.getElementById('git-status');
-    statusDiv.textContent = 'Committing and pushing...';
-    statusDiv.style.color = '#3498db';
-    
-    try {
-        const res = await fetch(`/api/tasks/${taskId}/git-commit`, {
-            method: 'POST',
-            body: fd
-        });
-        
-        const data = await res.json();
-        
-        if (res.ok && data.success) {
-            statusDiv.textContent = `✓ ${data.message}`;
-            statusDiv.style.color = '#2ecc71';
-            setTimeout(() => {
-                closeModal('git-commit-modal');
-                window.location.reload();
-            }, 2000);
-        } else {
-            statusDiv.textContent = `✗ Error: ${data.detail || data.error || 'Unknown error'}`;
-            statusDiv.style.color = '#e74c3c';
-        }
-    } catch (err) {
-        statusDiv.textContent = `✗ Network error: ${err.message}`;
-        statusDiv.style.color = '#e74c3c';
-    }
-    
-    return false;
-}
 </script>
 {% endblock %}

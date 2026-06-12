@@ -700,11 +700,11 @@ def create_app() -> FastAPI:
                 "id": project.id,
                 "name": project.name,
                 "description": project.description,
-                "review_user_id": project.review_user_id,
+                "merger_user_id": project.merger_user_id,
             }
 
     @app.patch("/api/projects/{project_id}")
-    async def update_project(project_id: int, name: Optional[str] = Form(None), description: Optional[str] = Form(None), review_user_id: Optional[int] = Form(None)):
+    async def update_project(project_id: int, name: Optional[str] = Form(None), description: Optional[str] = Form(None), merger_user_id: Optional[int] = Form(None)):
         async with async_session() as session:
             project = await session.get(Project, project_id)
             if not project:
@@ -713,8 +713,8 @@ def create_app() -> FastAPI:
                 project.name = name
             if description is not None:
                 project.description = description
-            if review_user_id is not None:
-                project.review_user_id = review_user_id if review_user_id > 0 else None
+            if merger_user_id is not None:
+                project.merger_user_id = merger_user_id if merger_user_id > 0 else None
             await session.commit()
             return {"ok": True}
 
@@ -747,6 +747,8 @@ def create_app() -> FastAPI:
         description: str = Form(""),
         assignee_id: Optional[int] = Form(None),
         complexity: Optional[str] = Form(None),
+        is_bug: bool = Form(False),
+        questions: str = Form(""),  # JSON array of strings, only if is_bug
     ):
         async with async_session() as session:
             project = await get_or_404(session, Project, project_id, "Project")
@@ -756,16 +758,17 @@ def create_app() -> FastAPI:
             )
             last = result.scalar_one_or_none()
             pos = (last.position + 1) if last else 0
-            
+
             # Auto-assign based on complexity if no assignee specified
             final_assignee_id = assignee_id
             if final_assignee_id is None and complexity:
-                # Find user assigned to this size
-                assigned_user_id = await find_user_by_size(session, complexity)
+                # Use the new find_user_by_size that uses task_types ARRAY
+                from .utils import find_user_by_size
+                assigned_user_id = await find_user_by_size(session, complexity.lower())
                 if assigned_user_id:
                     final_assignee_id = assigned_user_id
                     logger.info(f"Task '{title}' auto-assigned to user {assigned_user_id} based on size {complexity}")
-            
+
             task = Task(
                 project_id=project_id,
                 title=title,
@@ -773,11 +776,25 @@ def create_app() -> FastAPI:
                 assignee_id=final_assignee_id,
                 complexity=complexity,
                 position=pos,
+                is_bug=is_bug,
             )
             session.add(task)
             await session.commit()
             await session.refresh(task)
-            return {"id": task.id, "title": task.title, "column": task.board_column, "assignee_id": task.assignee_id}
+
+            # If bug with questions, save them as a comment
+            if is_bug and questions:
+                import json as _json
+                try:
+                    qlist = _json.loads(questions)
+                    if isinstance(qlist, list) and qlist:
+                        content = "🐛 Bug report questions:\n" + "\n".join(f"- {q}" for q in qlist)
+                        session.add(TaskComment(task_id=task.id, author="user", content=content))
+                        await session.commit()
+                except Exception:
+                    pass
+
+            return {"id": task.id, "title": task.title, "column": task.board_column, "assignee_id": task.assignee_id, "is_bug": task.is_bug}
 
     @app.get("/api/tasks/{task_id}")
     async def get_task(task_id: int):
@@ -809,6 +826,7 @@ def create_app() -> FastAPI:
                 "assignee_id": task.assignee_id,
                 "complexity": task.complexity,
                 "position": task.position,
+                "is_bug": task.is_bug,
                 "comments": comments,
                 "depends_on": depends_on,
                 "depended_by": depended_by,
@@ -2127,6 +2145,81 @@ Return ONLY valid JSON, no other text."""
             return {"status": "created", "data": result["data"]}
         else:
             return {"status": "error", "message": result["error"]}
+
+    @app.post("/api/tasks/{task_id}/merge")
+    async def merge_task_branch(task_id: int, payload: Optional[dict] = None):
+        """Merge a task's branch into main and mark task as done.
+        Payload (optional): {comment: str, move_back_to: 'running'|'blocked'}
+        """
+        payload = payload or {}
+        move_back_to = payload.get("move_back_to")
+        comment = payload.get("comment", "")
+
+        async with async_session() as session:
+            task = await session.get(Task, task_id)
+            if not task:
+                raise HTTPException(404, "Task not found")
+            if task.board_column != "review":
+                raise HTTPException(400, "Task must be in 'review' to merge")
+
+            # Get project
+            project = await session.get(Project, task.project_id)
+            if not project or not project.repo_name:
+                raise HTTPException(400, "Project has no repository")
+
+            # Get git settings
+            username = await get_setting("git_username", "")
+            token = await get_setting("git_token", "")
+            default_branch = await get_setting("git_default_branch", "main")
+
+            if not username or not token:
+                raise HTTPException(400, "Git credentials not configured in Settings")
+
+            # Get task branch from git state
+            branch_result = await session.execute(
+                sa_select(TaskGitState).where(TaskGitState.task_id == task_id)
+            )
+            git_state = branch_result.scalar_one_or_none()
+            task_branch = git_state.branch if git_state else None
+
+            if not task_branch:
+                # No branch tracked — just move to done
+                task.board_column = "done"
+                if comment:
+                    session.add(TaskComment(
+                        task_id=task_id,
+                        author="user",
+                        content=comment,
+                    ))
+                await session.commit()
+                return {"ok": True, "column": "done", "merged": False, "note": "No branch tracked, moved to done"}
+
+            # Use the GitHubService to merge via API
+            gh = GitHubService(username, token, project.repo_name)
+            result = await gh.merge_branch(project.repo_name, task_branch, default_branch)
+
+            if result.get("status") == "merged":
+                task.board_column = "done"
+                session.add(TaskComment(
+                    task_id=task_id,
+                    author="user",
+                    content=f"✅ Merged into {default_branch}\n\n{comment}".strip(),
+                ))
+                await session.commit()
+                return {"ok": True, "column": "done", "merged": True}
+            elif result.get("status") == "conflict":
+                # Move back to specified column (running or blocked) with conflict info
+                target = move_back_to if move_back_to in ("running", "blocked") else "blocked"
+                task.board_column = target
+                session.add(TaskComment(
+                    task_id=task_id,
+                    author="user",
+                    content=f"⚠️ Merge conflict\n\n{comment}\n\nConflict details: {result.get('message', '')}".strip(),
+                ))
+                await session.commit()
+                return {"ok": False, "column": target, "merged": False, "error": result.get("message", "Conflict")}
+            else:
+                raise HTTPException(500, f"Merge failed: {result.get('message', 'Unknown error')}")
 
     @app.post("/api/tasks/{task_id}/git-commit")
     async def git_commit_push(

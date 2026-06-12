@@ -142,9 +142,12 @@ async def set_user_default_sizes(session: Any, user_id: int, sizes: Sequence[str
 
 
 async def find_user_by_size(session: Any, size: str) -> Optional[int]:
-    """Find which user is assigned to a given polo size. Returns user_id or None."""
-    result = await session.execute(
-        sa_select(UserDefaultSize.user_id).where(UserDefaultSize.size == size)
-    )
-    row = result.first()
-    return row[0] if row else None
+        """Find which user is assigned to a given task type/size. Returns user_id or None.
+        Uses the user.task_types ARRAY column."""
+        from .database import User
+        size_lower = size.lower()
+        result = await session.execute(
+            sa_select(User).where(User.task_types.contains([size_lower]))
+        )
+        user = result.scalars().first()
+        return user.id if user else None
