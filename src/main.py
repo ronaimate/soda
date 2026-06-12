@@ -260,11 +260,15 @@ def create_app() -> FastAPI:
         # Generate the full prompt dynamically (from operations module)
         full_prompt = await generate_task_prompt(task, project, comments, depends_on_ids)
 
-        # Build authenticated repo URL
+        # Build authenticated repo URL (ensure .git suffix for clone)
         auth_repo_url = repo_url
         if repo_url and git_username and git_token:
-            auth_repo_url = repo_url.replace("https://github.com/", f"https://{git_username}:{git_token}@github.com/")
-            auth_repo_url = auth_repo_url.replace("http://github.com/", f"https://{git_username}:{git_token}@github.com/")
+            base_url = repo_url.rstrip("/")
+            if not base_url.endswith(".git"):
+                base_url += ".git"
+            base_url = base_url.replace("https://github.com/", f"https://{git_username}:{git_token}@github.com/")
+            base_url = base_url.replace("http://github.com/", f"https://{git_username}:{git_token}@github.com/")
+            auth_repo_url = base_url
 
         # Create task workdir and clone repo
         workdir_base = Path("/tmp/soda-task-workdirs")
@@ -315,16 +319,28 @@ def create_app() -> FastAPI:
         if auth_repo_url:
             import shutil
             import subprocess as sp
+            import tempfile
             clone_error = None
             try:
-                for item in workdir.iterdir():
-                    if item.is_dir() and not item.name.startswith(".soda"):
-                        shutil.rmtree(item)
-                    elif item.is_file() and not item.name.startswith(".soda"):
-                        item.unlink()
-                sp.run(["git", "clone", auth_repo_url, str(workdir)], check=True, capture_output=True, timeout=180)
-                sp.run(["git", "checkout", "main"], cwd=str(workdir), check=True, capture_output=True, timeout=30)
-                sp.run(["git", "pull", "origin", "main"], cwd=str(workdir), check=True, capture_output=True, timeout=30)
+                # Clone into a temp dir first (workdir is not empty — has .soda-prompt.txt)
+                clone_tmp = Path(tempfile.mkdtemp(prefix=f"clone-task-{task.id}-"))
+                try:
+                    sp.run(["git", "clone", "--branch", "main", "--single-branch", auth_repo_url, str(clone_tmp)],
+                           check=True, capture_output=True, timeout=180)
+                    # Move cloned contents into workdir (overwrite everything except .soda-*)
+                    for item in clone_tmp.iterdir():
+                        dest = workdir / item.name
+                        if dest.name.startswith(".soda-"):
+                            continue  # don't overwrite soda metadata
+                        if dest.exists():
+                            if dest.is_dir():
+                                shutil.rmtree(dest)
+                            else:
+                                dest.unlink()
+                        shutil.move(str(item), str(dest))
+                finally:
+                    if clone_tmp.exists():
+                        shutil.rmtree(clone_tmp, ignore_errors=True)
             except Exception as e:
                 clone_error = str(e)[:500]
                 logger.warning(f"Task {task.id}: git clone failed: {clone_error}")
@@ -2304,7 +2320,7 @@ Return ONLY valid JSON, no other text."""
         if repo_exists:
             # Commit .gitignore if not present
             await gh_service.commit_gitignore(repo_name)
-            return {"status": "exists", "data": {"name": repo_name}}
+            return {"status": "exists", "data": {"name": repo_name, "html_url": f"https://github.com/{owner}/{repo_name}"}}
         
         # Create the repository
         result = await gh_service.create_repository(repo_name, private=private, auto_init=True)
