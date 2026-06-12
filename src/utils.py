@@ -81,64 +81,65 @@ VALID_SIZES = ["XS", "S", "M", "L", "XL"]
 
 
 async def get_user_default_sizes(session: Any, user_id: int) -> list[str]:
-    """Get all default polo sizes for a user."""
+    """Get all default polo sizes for a user (from User.task_types array)."""
+    from .database import User
     result = await session.execute(
-        sa_select(UserDefaultSize.size).where(UserDefaultSize.user_id == user_id)
+        sa_select(User.task_types).where(User.id == user_id)
     )
-    return [row[0] for row in result.all()]
+    row = result.first()
+    if not row or not row[0]:
+        return []
+    return [s for s in row[0] if s]
 
 
 async def set_user_default_sizes(session: Any, user_id: int, sizes: Sequence[str]) -> None:
     """
     Set default polo sizes for a user.
-    - Removes old sizes not in the new list
-    - Adds new sizes
-    - Validates that sizes are valid (XS/S/M/L/XL)
-    - Validates that no other user already has the same size
+    Updates the User.task_types ARRAY column (the v2 source of truth).
+    Also keeps UserDefaultSize table in sync for backward compatibility.
     """
+    from .database import User
+    
     # Validate sizes
     for size in sizes:
         if size not in VALID_SIZES:
             raise HTTPException(400, f"Invalid size: {size}. Must be one of {VALID_SIZES}")
     
+    # Lowercase all sizes (v2 stores them lowercase: xs, s, m, l, xl)
+    sizes_lower = [s.lower() for s in sizes]
+    
     # Check for conflicts with other users
-    if sizes:
+    if sizes_lower:
         conflict_result = await session.execute(
-            sa_select(UserDefaultSize.user_id, UserDefaultSize.size).where(
-                UserDefaultSize.size.in_(sizes),
-                UserDefaultSize.user_id != user_id,
+            sa_select(User.id, User.task_types).where(
+                User.id != user_id,
+                User.type == "ai",
+                User.task_types.overlap(sizes_lower),
             )
         )
         conflicts = conflict_result.all()
         if conflicts:
-            # Get user names for better error message
-            user_result = await session.execute(
-                sa_select(GlobalSetting).where(GlobalSetting.key == "users_by_id")
-            )
-            conflict_users = [(row[0], row[1]) for row in conflicts]
             conflict_desc = ", ".join(
-                f"size '{size}' already assigned to user_id {uid}"
-                for uid, size in conflict_users
+                f"size '{s}' already assigned to user_id {uid}"
+                for uid, user_types in conflicts
+                for s in user_types
+                if s in sizes_lower
             )
             raise HTTPException(400, f"Size conflict: {conflict_desc}")
     
-    # Remove old sizes not in new list
+    # Update User.task_types (the v2 source of truth)
+    user = await session.get(User, user_id)
+    if user:
+        user.task_types = sizes_lower
+    
+    # Also keep UserDefaultSize in sync for backward compat
     await session.execute(
         UserDefaultSize.__table__.delete().where(
             UserDefaultSize.user_id == user_id,
-            ~UserDefaultSize.size.in_(sizes) if sizes else True,
         )
     )
-    
-    # Add new sizes
-    existing_result = await session.execute(
-        sa_select(UserDefaultSize.size).where(UserDefaultSize.user_id == user_id)
-    )
-    existing_sizes = {row[0] for row in existing_result.all()}
-    
     for size in sizes:
-        if size not in existing_sizes:
-            session.add(UserDefaultSize(user_id=user_id, size=size))
+        session.add(UserDefaultSize(user_id=user_id, size=size))
 
 
 async def find_user_by_size(session: Any, size: str) -> Optional[int]:
@@ -147,7 +148,10 @@ async def find_user_by_size(session: Any, size: str) -> Optional[int]:
         from .database import User
         size_lower = size.lower()
         result = await session.execute(
-            sa_select(User).where(User.task_types.contains([size_lower]))
+            sa_select(User).where(
+                User.task_types.contains([size_lower]),
+                User.type == "ai",
+            )
         )
         user = result.scalars().first()
         return user.id if user else None

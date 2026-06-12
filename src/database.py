@@ -311,6 +311,27 @@ async def init_db():
         except Exception:
             pass
 
+        # Migrate user_default_sizes -> users.task_types (one-time)
+        # If a user has UserDefaultSize entries but empty task_types, copy them over.
+        try:
+            result = await conn.exec_driver_sql("""
+                SELECT u.id, COALESCE(array_agg(uds.size) FILTER (WHERE uds.size IS NOT NULL), '{}') as sizes
+                FROM users u
+                LEFT JOIN user_default_sizes uds ON uds.user_id = u.id
+                GROUP BY u.id
+            """)
+            for row in result.fetchall():
+                user_id, sizes = row[0], row[1] or []
+                # Lowercase all
+                sizes_lower = [s.lower() for s in sizes if s]
+                if sizes_lower:
+                    await conn.exec_driver_sql(
+                        "UPDATE users SET task_types = %s::varchar[] WHERE id = %s AND (task_types IS NULL OR cardinality(task_types) = 0)",
+                        (sizes_lower, user_id),
+                    )
+        except Exception as e:
+            print(f"UserDefaultSize -> task_types migration skipped: {e}")
+
         # Add projects.merger_user_id if missing (replace review_user_id if old)
         try:
             result = await conn.exec_driver_sql("""
