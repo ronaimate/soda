@@ -180,7 +180,24 @@ def create_app() -> FastAPI:
         Clones the project repo, checks out main, provides context,
         then after AI completes: git commit/push, create PR, send callback."""
         if not assignee.execute_command:
+            logger.warning(f"Task {task.id}: assignee {assignee.name} has no execute_command")
+            try:
+                async with async_session() as err_session:
+                    err_session.add(TaskComment(
+                        task_id=task.id,
+                        author="Soda",
+                        content=f"❌ AI user `{assignee.name}` has no execute_command configured. Edit the user in Settings → Users.",
+                    ))
+                    await err_session.commit()
+            except Exception:
+                pass
             return
+
+        # ── Register task as "starting" in running_processes so watchdog doesn't kill it ──
+        # Sentinel: tuple of (None, "starting", started_at_iso)
+        from datetime import datetime as _dt_start
+        running_processes[task.id] = (None, "starting", _dt_start.utcnow().isoformat())
+        logger.info(f"Task {task.id}: registered as starting, launching AI run...")
 
         # Use provided comments/depends_on_ids, or fetch fresh
         if comments is None:
@@ -1100,7 +1117,32 @@ def create_app() -> FastAPI:
 
             task.board_column = new_column
 
-            # If moving to Running and assignee is an AI user, execute command
+            # ── Save prompt comment FIRST (before AI run), so user always sees it ──
+            if new_column == "running" and task.assignee_id:
+                assignee_check = await session.get(User, task.assignee_id)
+                if assignee_check and assignee_check.type == "ai":
+                    # Build prompt preview (we'll save the full one inside _run_execute_command too)
+                    from datetime import datetime as _dt
+                    preview = (
+                        f"📋 **Task moved to Running**\n\n"
+                        f"**Title:** {task.title}\n"
+                        f"**Description:** {task.description or '(no description)'}\n"
+                        f"**Complexity:** {task.complexity or 'not specified'}\n"
+                        f"**Assignee:** {assignee_check.name} (AI)\n"
+                    )
+                    if assignee_check.model:
+                        preview += f"**Model:** `{assignee_check.model}`\n"
+                    if assignee_check.provider:
+                        preview += f"**Provider:** `{assignee_check.provider}`\n"
+                    preview += f"\n⏱️ Started at {_dt.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+                    preview += "Full prompt and AI output will appear below once the process starts..."
+                    session.add(TaskComment(
+                        task_id=task.id,
+                        author="Soda",
+                        content=preview,
+                    ))
+
+            # ── If moving to Running and assignee is an AI user, execute command ──
             if new_column == "running":
                 if task.assignee_id:
                     assignee = await session.get(User, task.assignee_id)
@@ -1118,9 +1160,25 @@ def create_app() -> FastAPI:
                             sa_select(TaskDependency.depends_on_id).where(TaskDependency.task_id == task.id)
                         )
                         depends_on_ids = [row[0] for row in deps_result.all()]
-                        await _run_execute_command(
-                            task, assignee, comments=comments, depends_on_ids=depends_on_ids
-                        )
+                        # Commit the preview comment before launching AI
+                        await session.commit()
+                        try:
+                            await _run_execute_command(
+                                task, assignee, comments=comments, depends_on_ids=depends_on_ids
+                            )
+                        except Exception as e:
+                            logger.error(f"Task {task.id}: _run_execute_command failed: {e}")
+                            # Save error comment so user sees what went wrong
+                            try:
+                                async with async_session() as err_session:
+                                    err_session.add(TaskComment(
+                                        task_id=task.id,
+                                        author="Soda",
+                                        content=f"❌ **AI run failed to start:** {str(e)[:1000]}",
+                                    ))
+                                    await err_session.commit()
+                            except Exception:
+                                pass
 
             # If moving from blocked to running, kill old process if any
             if old_column == "blocked" and new_column == "running":
@@ -2626,6 +2684,39 @@ Return ONLY valid JSON, no other text."""
                         # Grace period: skip tasks just moved to running
                         if task.updated_at and (now - task.updated_at).total_seconds() < GRACE_PERIOD_SEC:
                             continue
+
+                        # Case 0: Task is in "starting" state (process not yet launched)
+                        # Give it extra time: up to STARTING_TIMEOUT_SEC
+                        STARTING_TIMEOUT_SEC = 600  # 10 minutes for git clone + process start
+                        if proc_info and isinstance(proc_info, tuple) and len(proc_info) >= 2 and proc_info[1] == "starting":
+                            try:
+                                started_at = proc_info[2]
+                                from datetime import datetime as _dtp
+                                started_dt = _dtp.fromisoformat(started_at)
+                                if started_dt.tzinfo is None:
+                                    started_dt = started_dt.replace(tzinfo=timezone.utc)
+                                elapsed = (now - started_dt).total_seconds()
+                                if elapsed < STARTING_TIMEOUT_SEC:
+                                    # Still within starting window — skip
+                                    continue
+                                # Exceeded starting timeout — process never started
+                                _watchdog_logger.warning(f"Task {task.id} stuck in 'starting' for {elapsed:.0f}s, moving to blocked")
+                                task.board_column = "blocked"
+                                session.add(TaskComment(
+                                    task_id=task.id,
+                                    author="Soda",
+                                    content=(
+                                        f"⚠️ Watchdog: Task stuck in 'starting' for {elapsed:.0f}s. "
+                                        f"The AI process never started (git clone may have timed out, "
+                                        f"or the execute_command failed). Task moved to blocked."
+                                    ),
+                                ))
+                                # Clean up the starting sentinel
+                                running_processes.pop(task.id, None)
+                                continue
+                            except Exception as e:
+                                logger.warning(f"Watchdog starting-state check failed for task {task.id}: {e}")
+                                continue
 
                         # Case 1: Task is running but no process tracked → stuck
                         if not proc_info:
