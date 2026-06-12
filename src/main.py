@@ -1275,34 +1275,57 @@ def create_app() -> FastAPI:
         # Ensure model has openrouter/ prefix if not already
         model_str = f"openrouter/{model}" if "/" not in model else model
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://soda.local",
-                },
-                json={
-                    "model": model_str,
-                    "messages": [
-                        {"role": "system", "content": "You are an expert software architect. You output ONLY valid JSON, no other text."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.2,
-                },
-            )
+        last_error = None
+        # Try up to 3 times — OpenRouter often returns transient empty responses
+        for attempt in range(1, 4):
+            async with httpx.AsyncClient(timeout=120) as client:
+                try:
+                    resp = await client.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                            "HTTP-Referer": "https://soda.local",
+                        },
+                        json={
+                            "model": model_str,
+                            "messages": [
+                                {"role": "system", "content": "You are an expert software architect. You output ONLY valid JSON, no other text."},
+                                {"role": "user", "content": prompt},
+                            ],
+                            "temperature": 0.2,
+                        },
+                    )
+                except Exception as e:
+                    last_error = f"HTTP error: {e}"
+                    logger.warning(f"OpenRouter attempt {attempt}/3 failed: {e}")
+                    await asyncio.sleep(2 * attempt)
+                    continue
 
-            if resp.status_code != 200:
-                err_detail = resp.text[:500]
-                logger.error(f"OpenRouter API error ({resp.status_code}): {err_detail}")
-                raise HTTPException(500, f"Architect API error ({resp.status_code}): {err_detail}")
+                if resp.status_code != 200:
+                    err_detail = resp.text[:500]
+                    last_error = f"HTTP {resp.status_code}: {err_detail}"
+                    logger.warning(f"OpenRouter attempt {attempt}/3 failed: {last_error}")
+                    # 4xx is permanent (bad model, invalid key) — don't retry
+                    if 400 <= resp.status_code < 500:
+                        raise HTTPException(500, f"Architect API error: {last_error}")
+                    await asyncio.sleep(2 * attempt)
+                    continue
 
-            data = resp.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                data = resp.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-            if not content:
-                raise HTTPException(500, "Architect returned empty response from OpenRouter")
+                if not content:
+                    last_error = "Empty content in response"
+                    logger.warning(f"OpenRouter attempt {attempt}/3 returned empty content")
+                    await asyncio.sleep(2 * attempt)
+                    continue
+
+                # Got content — break out of retry loop
+                break
+        else:
+            # All retries exhausted
+            raise HTTPException(500, f"Architect returned empty response from OpenRouter after 3 attempts: {last_error}")
 
         output = content.strip()
         json_match = re.search(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', output)
