@@ -304,12 +304,12 @@ async function pollIdeaStatus(ideaId, maxAttempts = 60) {
             if (idea.status === 'generated') {
                 statusText.textContent = 'Project created! Opening...';
                 return { status: 'generated', project_id: idea.project_id };
-            } else if (idea.status === 'active' && idea.questions && idea.questions.length > 0) {
+            } else if (idea.status === 'active' && idea.questions) {
                 try {
-                    const q = JSON.parse(idea.questions);
-                    if (q.error) return { status: 'error' };
+                    const q = typeof idea.questions === 'string' ? JSON.parse(idea.questions) : idea.questions;
+                    if (q && q.error) return { status: 'error', message: q.error };
+                    if (Array.isArray(q) && q.length > 0) return { status: 'questions' };
                 } catch(e) {}
-                return { status: 'questions' };
             } else if (idea.status === 'error') {
                 return { status: 'error' };
             }

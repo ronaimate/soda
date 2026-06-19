@@ -45,6 +45,14 @@
             <input type="password" name="minimax_api_key" value="{{ settings.get('minimax_api_key', '') }}" placeholder="..." class="input-mono" autocomplete="off">
         </div>
 
+        <h3 style="margin-top:24px">🎯 Default AI Provider</h3>
+        <label>Provider for architect and users without a provider set</label>
+        <select name="ai_provider">
+            <option value="openrouter" {% if settings.get('ai_provider', 'openrouter') == 'openrouter' %}selected{% endif %}>OpenRouter (recommended)</option>
+            <option value="opencode" {% if settings.get('ai_provider') == 'opencode' %}selected{% endif %}>OpenCode CLI</option>
+        </select>
+        <p class="help-text">OpenRouter uses direct HTTP for idea planning and task coding. OpenCode runs the CLI subprocess.</p>
+
         <h3 style="margin-top:24px">🔧 Git Integration</h3>
         <p class="help-text">Required for project repo creation, commit/push, and PR workflows.</p>
 

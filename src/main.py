@@ -28,6 +28,8 @@ from .utils import (
 from .github_service import GitHubService
 from .models import CallbackPayload, TaskMovePayload, CommentPayload
 from .operations import get_operation_command, set_operation_command, get_all_operation_commands, generate_task_prompt
+from .scaffold import get_scaffold_files
+from .ai_client import run_openrouter_coding_task, architect_from_snapshot, parse_json_from_llm_output
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -164,12 +166,30 @@ def create_app() -> FastAPI:
 
     async def _get_effective_api_key(user_provider: str = None) -> str:
         """Get the API key for the given provider (or global ai_provider setting)."""
-        provider = user_provider or await get_setting("ai_provider", "opencode")
+        provider = user_provider or await get_setting("ai_provider", "openrouter")
         if provider == "openrouter":
             return await _get_openrouter_api_key()
         if provider == "minimax":
             return await _get_minimax_api_key()
         return await _get_opencode_api_key()
+
+    def _architect_snapshot(user: User) -> dict:
+        return {
+            "id": user.id,
+            "name": user.name,
+            "provider": user.provider,
+            "model": user.model,
+            "api_key": user.api_key,
+            "system_prompt": user.system_prompt,
+        }
+
+    _VALID_COMPLEXITIES = frozenset({"XS", "S", "M", "L", "XL"})
+
+    def _normalize_complexity(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        upper = str(value).upper().strip()
+        return upper if upper in _VALID_COMPLEXITIES else None
 
     # ── Helper: run execute command ─────────────────────────────────
 
@@ -224,7 +244,7 @@ def create_app() -> FastAPI:
 
         # Write auth.json: always use assignee's provider, with correct API key
         # Priority: assignee.api_key > global key matching assignee.provider
-        user_provider = assignee.provider or await get_setting("ai_provider", "opencode")
+        user_provider = assignee.provider or await get_setting("ai_provider", "openrouter")
         user_api_key = assignee.api_key
         if not user_api_key:
             # Fall back to global key for this user's provider
@@ -359,7 +379,7 @@ def create_app() -> FastAPI:
                 # Clone into a temp dir first (workdir is not empty — has .soda-prompt.txt)
                 clone_tmp = Path(tempfile.mkdtemp(prefix=f"clone-task-{task.id}-"))
                 try:
-                    sp.run(["git", "clone", "--branch", "main", "--single-branch", auth_repo_url, str(clone_tmp)],
+                    sp.run(["git", "clone", "--branch", default_branch, "--single-branch", auth_repo_url, str(clone_tmp)],
                            check=True, capture_output=True, timeout=180)
                     # Move cloned contents into workdir (overwrite everything except .soda-*)
                     for item in clone_tmp.iterdir():
@@ -388,6 +408,64 @@ def create_app() -> FastAPI:
                         await err_session.commit()
                 except Exception:
                     pass
+
+        # Store context for post-processing (OpenRouter + OpenCode paths)
+        _post_process_ctx[task.id] = {
+            "callback_url": callback_url,
+            "workdir": str(workdir),
+            "auth_repo_url": auth_repo_url,
+            "repo_name": repo_name,
+            "git_username": git_username,
+            "git_token": git_token,
+            "default_branch": default_branch,
+            "project_id": task.project_id,
+            "openrouter_sync": False,
+        }
+
+        if user_provider == "openrouter":
+            _post_process_ctx[task.id]["openrouter_sync"] = True
+            stdout_file = workdir / ".soda-stdout.log"
+            stderr_file = workdir / ".soda-stderr.log"
+            try:
+                coding = await run_openrouter_coding_task(assignee, full_prompt, workdir, user_api_key)
+                stdout_file.write_text(coding.output or "")
+                if coding.error:
+                    stderr_file.write_text(coding.error)
+            except Exception as e:
+                stderr_file.write_text(str(e))
+                coding = None
+
+            running_processes.pop(task.id, None)
+
+            if coding and coding.blocked:
+                async with async_session() as session:
+                    t = await session.get(Task, task.id)
+                    if t:
+                        t.board_column = "blocked"
+                        session.add(TaskComment(
+                            task_id=task.id, author="Soda",
+                            content=f"⚠️ AI reported it's blocked:\n\n{coding.blocked}",
+                        ))
+                        await session.commit()
+                _post_process_ctx.pop(task.id, None)
+                return
+
+            if not coding or not coding.success:
+                err = (coding.error if coding else "Unknown error") or "Coding failed"
+                async with async_session() as session:
+                    t = await session.get(Task, task.id)
+                    if t:
+                        t.board_column = "blocked"
+                        session.add(TaskComment(
+                            task_id=task.id, author="Soda",
+                            content=f"⚠️ **OpenRouter coding failed:** {err[:1000]}",
+                        ))
+                        await session.commit()
+                _post_process_ctx.pop(task.id, None)
+                return
+
+            await _post_process_task(task.id)
+            return
 
         # Build env — use the same effective API key for subprocess
         env = os.environ.copy()
@@ -422,8 +500,7 @@ def create_app() -> FastAPI:
         )
         running_processes[task.id] = (proc, stdout_fd, stderr_fd)
 
-        # Store context for post-processing
-        _post_process_ctx[task.id] = {
+        _post_process_ctx[task.id].update({
             "callback_url": callback_url,
             "workdir": str(workdir),
             "auth_repo_url": auth_repo_url,
@@ -432,7 +509,7 @@ def create_app() -> FastAPI:
             "git_token": git_token,
             "default_branch": default_branch,
             "project_id": task.project_id,
-        }
+        })
 
 
     # Context for post-processing after AI completes
@@ -459,12 +536,13 @@ def create_app() -> FastAPI:
             git_username = ctx["git_username"]
             git_token = ctx["git_token"]
             default_branch = ctx["default_branch"]
+            openrouter_sync = ctx.get("openrouter_sync", False)
 
             # Check for AI blocking message in stdout
             # The prompt tells AI: "If you cannot complete the task, describe what is blocking you as the last line of your output"
             blocked_reason = ""
             stdout_file = workdir / ".soda-stdout.log"
-            if stdout_file.exists():
+            if stdout_file.exists() and not openrouter_sync:
                 try:
                     stdout_text = stdout_file.read_text().strip()
                     if stdout_text:
@@ -506,7 +584,7 @@ def create_app() -> FastAPI:
                 except Exception:
                     pass
 
-            if not stdout_text:
+            if not stdout_text and not openrouter_sync:
                 # No AI output at all — indicates execution error
                 error_detail = stderr_text[:2000] if stderr_text else "Unknown error (no output)"
                 async with async_session() as session:
@@ -534,10 +612,23 @@ def create_app() -> FastAPI:
                 task = await session.get(Task, task_id)
                 if not task:
                     return
+                feature_branch = f"task-{task_id}"
                 if pr_url:
                     task.board_column = "review"
                     session.add(TaskComment(task_id=task_id, author="Soda",
                         content=f"📦 **Pull Request created:** {pr_url}"))
+                    git_state = await session.get(TaskGitState, task_id)
+                    if git_state:
+                        git_state.branch = feature_branch
+                        git_state.repo = repo_name
+                        git_state.workdir = str(workdir)
+                    else:
+                        session.add(TaskGitState(
+                            task_id=task_id,
+                            branch=feature_branch,
+                            repo=repo_name,
+                            workdir=str(workdir),
+                        ))
                 elif git_username and git_token:
                     task.board_column = "blocked"
                     session.add(TaskComment(task_id=task_id, author="Soda",
@@ -1096,6 +1187,16 @@ def create_app() -> FastAPI:
 
             task.board_column = new_column
 
+            # If moving from blocked to running, kill old process before starting a new one
+            if old_column == "blocked" and new_column == "running":
+                if task.id in running_processes:
+                    proc_info = running_processes[task.id]
+                    if isinstance(proc_info, tuple) and len(proc_info) >= 1 and proc_info[0] is not None:
+                        proc = proc_info[0]
+                        if proc.returncode is None:
+                            proc.kill()
+                    del running_processes[task.id]
+
             # ── Save prompt comment FIRST (before AI run), so user always sees it ──
             if new_column == "running" and task.assignee_id:
                 assignee_check = await session.get(User, task.assignee_id)
@@ -1158,14 +1259,6 @@ def create_app() -> FastAPI:
                                     await err_session.commit()
                             except Exception:
                                 pass
-
-            # If moving from blocked to running, kill old process if any
-            if old_column == "blocked" and new_column == "running":
-                if task.id in running_processes:
-                    proc, stdout_fd, stderr_fd = running_processes[task.id]
-                    if proc.returncode is None:
-                        proc.kill()
-                    del running_processes[task.id]
 
             # If moving to backlog, kill process
             if new_column == "backlog" and task.id in running_processes:
@@ -1318,7 +1411,7 @@ def create_app() -> FastAPI:
 
         logger.info(f"Calling architect {architect.name} with prompt length: {len(prompt)}")
 
-        p = await get_setting("ai_provider", "opencode")
+        p = getattr(architect, "provider", None) or await get_setting("ai_provider", "openrouter")
 
         if p == "openrouter":
             return await _call_openrouter_architect(architect, prompt)
@@ -1331,9 +1424,8 @@ def create_app() -> FastAPI:
         if not api_key:
             raise HTTPException(400, "OpenRouter API key not configured in Settings")
 
-        model = architect.model or "openrouter/auto"
-        # Ensure model has openrouter/ prefix if not already
-        model_str = f"openrouter/{model}" if "/" not in model else model
+        model = architect.model or "anthropic/claude-sonnet-4"
+        model_str = model if "/" in model else f"openrouter/{model}"
 
         last_error = None
         # Try up to 3 times — OpenRouter often returns transient empty responses
@@ -1388,15 +1480,11 @@ def create_app() -> FastAPI:
             raise HTTPException(500, f"Architect returned empty response from OpenRouter after 3 attempts: {last_error}")
 
         output = content.strip()
-        json_match = re.search(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', output)
-        if not json_match:
-            logger.error(f"No JSON found in architect output: {output[:500]}")
-            raise HTTPException(500, f"Architect did not return valid JSON. Output: {output[:200]}")
         try:
-            result = json.loads(json_match.group())
+            result = parse_json_from_llm_output(output)
             logger.info(f"Successfully parsed architect response: {result.get('type')}")
             return result
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, ValueError) as e:
             logger.error(f"Failed to parse architect JSON: {str(e)}, Output: {output[:500]}")
             raise HTTPException(500, f"Failed to parse architect JSON response: {str(e)}")
 
@@ -1438,15 +1526,11 @@ def create_app() -> FastAPI:
             logger.error(f"Architect process failed with code {proc.returncode}")
             raise HTTPException(500, f"Architect process failed (code {proc.returncode}): {error_output[:500]}")
 
-        json_match = re.search(r'\{[\s\S]*\}', output)
-        if not json_match:
-            logger.error(f"No JSON found in architect output: {output[:500]}")
-            raise HTTPException(500, f"Architect did not return valid JSON. Stderr: {error_output[:200]}, Output: {output[:200]}")
         try:
-            result = json.loads(json_match.group())
+            result = parse_json_from_llm_output(output)
             logger.info(f"Successfully parsed architect response: {result.get('type')}")
             return result
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, ValueError) as e:
             logger.error(f"Failed to parse architect JSON: {str(e)}, Output: {output[:500]}")
             raise HTTPException(500, f"Failed to parse architect JSON response: {str(e)}")
 
@@ -1459,7 +1543,13 @@ def create_app() -> FastAPI:
         """Create project and tasks from architect generate response.
         Also creates a GitHub repo for the project.
         If repo creation fails, the entire project generation fails (no tasks created)."""
-        # First, verify GitHub auth is configured
+        async with async_session() as session:
+            existing = await session.execute(
+                sa_select(Project).where(Project.source_idea_id == idea.id)
+            )
+            if existing.scalar_one_or_none():
+                raise HTTPException(400, "A project already exists for this idea")
+
         username = await get_setting("git_username")
         token = await get_setting("git_token")
 
@@ -1470,7 +1560,6 @@ def create_app() -> FastAPI:
                 "The token needs 'repo' scope to create repositories."
             )
 
-        # Determine repo name: use provided name or sanitize from project name
         if repo_name:
             repo_name = re.sub(r'[^a-z0-9-]', '', repo_name.lower().replace(' ', '-'))[:100]
         else:
@@ -1480,7 +1569,11 @@ def create_app() -> FastAPI:
         if not repo_name:
             repo_name = f"soda-{idea.id}"
 
-        # Create GitHub repo for the project — if this fails, everything fails
+        project_name = result.get("project_name", idea.title)
+        project_description = result.get("project_description", idea.description)
+        tech_stack = result.get("tech_stack", "generic")
+        default_branch = await get_setting("git_default_branch", "main")
+
         ensure_result = await _ensure_github_repo(username, repo_name, token, private=repo_private)
         if ensure_result["status"] == "error":
             raise HTTPException(400,
@@ -1488,6 +1581,15 @@ def create_app() -> FastAPI:
                 "Please check your git_token has 'repo' scope and the repo name is valid. "
                 "Project generation was cancelled."
             )
+
+        if ensure_result["status"] == "created":
+            scaffold_files = get_scaffold_files(tech_stack, project_name, project_description or "")
+            gh_service = GitHubService(username, token)
+            ok = await gh_service.commit_files(
+                repo_name, scaffold_files, "chore: initial project scaffold", branch=default_branch
+            )
+            if not ok:
+                logger.warning("Scaffold commit failed for %s — repo has default files only", repo_name)
 
         repo_url = ensure_result["data"].get("html_url", f"https://github.com/{username}/{repo_name}")
 
@@ -1545,7 +1647,7 @@ def create_app() -> FastAPI:
                     project_id=project.id,
                     title=t.get("title", "Untitled"),
                     description=t.get("description", ""),
-                    complexity=t.get("complexity"),
+                    complexity=_normalize_complexity(t.get("complexity")),
                     board_column="backlog",
                     position=i,
                     assignee_id=assignee_id,
@@ -1645,8 +1747,9 @@ If you are ready to generate, return ONLY this JSON:
   "type": "generate",
   "project_name": "...",
   "project_description": "...",
+  "tech_stack": "python-fastapi|node-express|static-html|generic",
   "tasks": [
-    {{"title": "...", "description": "...", "complexity": "S|M|L|XL", "assignee_role": "junior|medior|senior", "depends_on": []}}
+    {{"title": "...", "description": "...", "complexity": "XS|S|M|L|XL", "assignee_role": "junior|medior|senior", "depends_on": []}}
   ]
 }}
 
@@ -1656,25 +1759,24 @@ IMPORTANT: Each task can have a "depends_on" field with indices of previous task
 - Use task indices (0-based) for dependencies, e.g., "depends_on": [0, 1]
 - Create a logical dependency chain: setup → core → features → tests → deploy
 - A task can depend on multiple previous tasks if needed
+- Choose tech_stack based on the idea (python-fastapi for Python APIs, node-express for Node, static-html for simple sites)
 
 Return ONLY valid JSON, no other text."""
 
-        # Find the project linked to this idea (via Project.source_idea_id)
-        proj_result = await session.execute(
-            sa_select(Project).where(Project.source_idea_id == idea_id)
-        )
-        project_for_idea = proj_result.scalar_one_or_none()
+            proj_result = await session.execute(
+                sa_select(Project).where(Project.source_idea_id == idea_id)
+            )
+            project_for_idea = proj_result.scalar_one_or_none()
+            architect_snapshot = _architect_snapshot(architect)
 
-        # Start background task for architect call + project creation
         asyncio.create_task(_generate_project_background(
             idea_id=idea_id,
-            architect=architect,
+            architect_snapshot=architect_snapshot,
             prompt=prompt,
             repo_name=repo_name,
             repo_private=repo_private == "true",
         ))
 
-        # Return current project_id (may be None for new ideas) so frontend can poll
         return {
             "status": "generating",
             "idea_id": idea_id,
@@ -1683,61 +1785,64 @@ Return ONLY valid JSON, no other text."""
 
     async def _generate_project_background(
         idea_id: int,
-        architect: User,
+        architect_snapshot: dict,
         prompt: str,
         repo_name: Optional[str] = None,
         repo_private: bool = True,
     ):
         """Background task: call architect, create project, handle errors."""
         generation_tasks.add(idea_id)
+        architect = architect_from_snapshot(architect_snapshot)
         try:
-            result = await _call_architect(architect, prompt)
-        except Exception as e:
-            logger.error(f"Architect call failed for idea {idea_id}: {type(e).__name__}: {e}")
-            async with async_session() as session:
-                idea_obj = await session.get(Idea, idea_id)
-                if idea_obj:
-                    idea_obj.status = "error"
-                    idea_obj.pending_questions = json.dumps({"error": str(e)})
-                    await session.commit()
-            return
-
-        if result.get("type") == "questions":
-            questions = result.get("questions", [])
-            async with async_session() as session:
-                idea_obj = await session.get(Idea, idea_id)
-                if idea_obj:
-                    idea_obj.status = "active"
-                    idea_obj.pending_questions = json.dumps(questions)
-                    await session.commit()
-            return
-
-        if result.get("type") == "generate":
             try:
-                async with async_session() as session:
-                    idea = await session.get(Idea, idea_id)
-                await _create_project_from_result(
-                    idea, result,
-                    repo_name=repo_name,
-                    repo_private=repo_private,
-                )
+                result = await _call_architect(architect, prompt)
             except Exception as e:
-                logger.error(f"Project creation failed for idea {idea_id}: {type(e).__name__}: {e}")
+                logger.error(f"Architect call failed for idea {idea_id}: {type(e).__name__}: {e}")
                 async with async_session() as session:
                     idea_obj = await session.get(Idea, idea_id)
                     if idea_obj:
                         idea_obj.status = "error"
                         idea_obj.pending_questions = json.dumps({"error": str(e)})
                         await session.commit()
-            return
+                return
 
-        # Unexpected response type
-        async with async_session() as session:
-            idea_obj = await session.get(Idea, idea_id)
-            if idea_obj:
-                idea_obj.status = "error"
-                idea_obj.pending_questions = json.dumps({"error": "Unexpected architect response type"})
-                await session.commit()
+            if result.get("type") == "questions":
+                questions = result.get("questions", [])
+                async with async_session() as session:
+                    idea_obj = await session.get(Idea, idea_id)
+                    if idea_obj:
+                        idea_obj.status = "active"
+                        idea_obj.pending_questions = json.dumps(questions)
+                        await session.commit()
+                return
+
+            if result.get("type") == "generate":
+                try:
+                    async with async_session() as session:
+                        idea = await session.get(Idea, idea_id)
+                    await _create_project_from_result(
+                        idea, result,
+                        repo_name=repo_name,
+                        repo_private=repo_private,
+                    )
+                except Exception as e:
+                    logger.error(f"Project creation failed for idea {idea_id}: {type(e).__name__}: {e}")
+                    async with async_session() as session:
+                        idea_obj = await session.get(Idea, idea_id)
+                        if idea_obj:
+                            idea_obj.status = "error"
+                            idea_obj.pending_questions = json.dumps({"error": str(e)})
+                            await session.commit()
+                return
+
+            async with async_session() as session:
+                idea_obj = await session.get(Idea, idea_id)
+                if idea_obj:
+                    idea_obj.status = "error"
+                    idea_obj.pending_questions = json.dumps({"error": "Unexpected architect response type"})
+                    await session.commit()
+        finally:
+            generation_tasks.discard(idea_id)
 
     @app.post("/api/ideas/{idea_id}/answer")
     async def answer_idea_questions(idea_id: int, answers: str = Form(...)):
@@ -1760,6 +1865,15 @@ Return ONLY valid JSON, no other text."""
                     pending_questions = []
 
             idea.status = "generating"
+            idea_title = idea.title
+            idea_description = idea.description
+            idea_system_prompt = idea.system_prompt
+            architect_snapshot = _architect_snapshot(architect)
+
+            proj_result2 = await session.execute(
+                sa_select(Project).where(Project.source_idea_id == idea_id)
+            )
+            project_for_idea2 = proj_result2.scalar_one_or_none()
             await session.commit()
 
         try:
@@ -1767,9 +1881,9 @@ Return ONLY valid JSON, no other text."""
         except json.JSONDecodeError:
             raise HTTPException(400, "Invalid answers format")
 
-        sys_prompt = architect.system_prompt or ""
-        if idea.system_prompt:
-            sys_prompt += "\n\n" + idea.system_prompt
+        sys_prompt = architect_snapshot.get("system_prompt") or ""
+        if idea_system_prompt:
+            sys_prompt += "\n\n" + idea_system_prompt
 
         qa_pairs = "\n".join([
             f"Q: {q}\nA: {a}"
@@ -1778,8 +1892,8 @@ Return ONLY valid JSON, no other text."""
 
         prompt = f"""You are an Architect AI. Generate a project plan from this idea.
 
-Title: {idea.title}
-Description: {idea.description}
+Title: {idea_title}
+Description: {idea_description}
 
 {sys_prompt}
 
@@ -1791,8 +1905,9 @@ Now generate the project. Return ONLY this JSON:
   "type": "generate",
   "project_name": "...",
   "project_description": "...",
+  "tech_stack": "python-fastapi|node-express|static-html|generic",
   "tasks": [
-    {{"title": "...", "description": "...", "complexity": "S|M|L|XL", "assignee_role": "junior|medior|senior", "depends_on": []}}
+    {{"title": "...", "description": "...", "complexity": "XS|S|M|L|XL", "assignee_role": "junior|medior|senior", "depends_on": []}}
   ]
 }}
 
@@ -1806,25 +1921,18 @@ IMPORTANT: Each task can have a "depends_on" field with indices of previous task
 - tasks[0] should always have "depends_on": [] (no dependencies)
 - Use task indices (0-based) for dependencies
 - Create a logical dependency chain
+- Choose tech_stack based on the idea
 
 Return ONLY valid JSON, no other text."""
 
-        # Find the project linked to this idea (via Project.source_idea_id)
-        proj_result2 = await session.execute(
-            sa_select(Project).where(Project.source_idea_id == idea_id)
-        )
-        project_for_idea2 = proj_result2.scalar_one_or_none()
-
-        # Start background task
         asyncio.create_task(_generate_project_background(
             idea_id=idea_id,
-            architect=architect,
+            architect_snapshot=architect_snapshot,
             prompt=prompt,
             repo_name=None,
             repo_private=True,
         ))
 
-        # Return current project_id (may be None for new ideas) so frontend can poll
         return {
             "status": "generating",
             "idea_id": idea_id,
@@ -2400,22 +2508,9 @@ Return ONLY valid JSON, no other text."""
                 sa_select(TaskGitState).where(TaskGitState.task_id == task_id)
             )
             git_state = branch_result.scalar_one_or_none()
-            task_branch = git_state.branch if git_state else None
+            task_branch = git_state.branch if git_state else f"task-{task_id}"
 
-            if not task_branch:
-                # No branch tracked — just move to done
-                task.board_column = "done"
-                if comment:
-                    session.add(TaskComment(
-                        task_id=task_id,
-                        author="user",
-                        content=comment,
-                    ))
-                await session.commit()
-                return {"ok": True, "column": "done", "merged": False, "note": "No branch tracked, moved to done"}
-
-            # Use the GitHubService to merge via API
-            gh = GitHubService(username, token, project.repo_name)
+            gh = GitHubService(username, token)
             result = await gh.merge_branch(project.repo_name, task_branch, default_branch)
 
             if result.get("status") == "merged":

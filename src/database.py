@@ -394,6 +394,8 @@ async def init_db():
             ("provider_opencode_enabled", "false"),
             ("provider_openrouter_enabled", "true"),
             ("provider_minimax_enabled", "false"),
+            ("ai_provider", "openrouter"),
+            ("git_default_branch", "main"),
         ]:
             existing = await session.execute(
                 sa_select(GlobalSetting).where(GlobalSetting.key == key)
@@ -417,36 +419,25 @@ async def init_db():
                 User(
                     name="Task Master",
                     type="ai",
+                    provider="openrouter",
                     model=_default_model,
                     task_types=["task_manager"],
                     system_prompt=(
-                        "You are the Task Master. Your job is to analyze project ideas and break them down into well-defined, actionable tasks.\n\n"
-                        "When given a project idea, you must:\n"
-                        "1. Analyze the idea thoroughly\n"
-                        "2. Create a list of specific, actionable tasks\n"
-                        "3. For each task, provide: title, description, complexity (XS/S/M/L/XL)\n"
-                        "4. Output everything as a structured JSON response\n\n"
-                        "Always think about:\n"
-                        "- What needs to be built first (foundation/infrastructure)\n"
-                        "- A logical sequential order\n"
-                        "- Appropriate complexity for each task\n\n"
-                        'Output format:\n'
-                        '{\n'
-                        '  "project_name": "...",\n'
-                        '  "project_description": "...",\n'
-                        '  "tasks": [\n'
-                        '    {\n'
-                        '      "title": "...",\n'
-                        '      "description": "...",\n'
-                        '      "complexity": "XS|S|M|L|XL"\n'
-                        '    }\n'
-                        '  ]\n'
-                        '}'
+                        "You are the Task Master. Analyze project ideas and break them into actionable tasks.\n\n"
+                        "Return ONLY valid JSON:\n"
+                        "If you need clarification:\n"
+                        '{"type": "questions", "questions": ["..."]}\n'
+                        "If ready to generate:\n"
+                        '{"type": "generate", "project_name": "...", "project_description": "...", '
+                        '"tech_stack": "python-fastapi|node-express|static-html|generic", '
+                        '"tasks": [{"title": "...", "description": "...", "complexity": "XS|S|M|L|XL", '
+                        '"assignee_role": "junior|medior|senior", "depends_on": []}]}\n'
                     ),
                 ),
                 User(
                     name="Junior Developer",
                     type="ai",
+                    provider="openrouter",
                     model=_default_model,
                     task_types=["xs", "s"],
                     system_prompt=(
@@ -461,6 +452,7 @@ async def init_db():
                 User(
                     name="Medior Developer",
                     type="ai",
+                    provider="openrouter",
                     model=_default_model,
                     task_types=["m", "l"],
                     system_prompt=(
@@ -475,6 +467,7 @@ async def init_db():
                 User(
                     name="Senior Developer",
                     type="ai",
+                    provider="openrouter",
                     model=_default_model,
                     task_types=["xl"],
                     system_prompt=(
@@ -491,3 +484,13 @@ async def init_db():
             for u in seed_users:
                 session.add(u)
             await session.commit()
+
+    # Backfill provider for existing AI users (one-time on startup)
+    async with async_session() as session:
+        result = await session.execute(
+            sa_select(User).where(User.type == "ai")
+        )
+        for user in result.scalars().all():
+            if not user.provider:
+                user.provider = "openrouter"
+        await session.commit()
