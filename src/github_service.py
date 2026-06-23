@@ -10,6 +10,8 @@ from typing import Optional, Dict, Any
 import git
 import httpx
 
+from .git_utils import build_github_clone_url
+
 logger = logging.getLogger("soda.github")
 
 
@@ -29,26 +31,20 @@ class GitHubService:
     
     def get_authenticated_repo_url(self, repo_url: str) -> str:
         """Convert public repo URL to authenticated URL with credentials."""
-        if not repo_url:
-            return repo_url
-        
-        auth_url = repo_url.replace(
-            "https://github.com/",
-            f"https://{self.username}:{self.token}@github.com/"
-        )
-        auth_url = auth_url.replace(
-            "http://github.com/",
-            f"https://{self.username}:{self.token}@github.com/"
-        )
-        return auth_url
-    
+        if not repo_url or not self.token:
+            return repo_url or ""
+        return build_github_clone_url(repo_url, self.token)
+
     def get_repo_url(self, repo_name: str) -> str:
         """Get public GitHub repository URL."""
         return f"{self.GITHUB_RAW_URL}/{self.username}/{repo_name}"
-    
+
     def get_authenticated_clone_url(self, repo_name: str) -> str:
         """Get authenticated clone URL with credentials."""
-        return f"https://{self.username}:{self.token}@github.com/{self.username}/{repo_name}.git"
+        return build_github_clone_url(
+            f"https://github.com/{self.username}/{repo_name}",
+            self.token,
+        )
     
     async def check_repo_exists(self, repo_name: str) -> bool:
         """Check if a repository exists."""
@@ -278,6 +274,41 @@ logs/
                 logger.error(f"Error committing .gitignore: {e}")
                 return False
 
+    async def commit_files(
+        self,
+        repo_name: str,
+        files: Dict[str, str],
+        message: str,
+        branch: str = "main",
+    ) -> bool:
+        """Create or update multiple files in a repository via the Contents API."""
+        async with httpx.AsyncClient() as client:
+            for path, content in files.items():
+                url = f"{self.GITHUB_API_URL}/repos/{self.username}/{repo_name}/contents/{path}"
+                try:
+                    sha = None
+                    check = await client.get(url, headers=self.headers, params={"ref": branch}, timeout=30)
+                    if check.status_code == 200:
+                        sha = check.json().get("sha")
+
+                    put_data = {
+                        "message": message,
+                        "content": base64.b64encode(content.encode()).decode(),
+                        "branch": branch,
+                    }
+                    if sha:
+                        put_data["sha"] = sha
+
+                    put = await client.put(url, json=put_data, headers=self.headers, timeout=30)
+                    if put.status_code not in (200, 201):
+                        logger.error("Failed to commit %s: %s %s", path, put.status_code, put.text[:200])
+                        return False
+                    logger.info("Committed %s to %s/%s", path, self.username, repo_name)
+                except Exception as e:
+                    logger.error("Error committing %s: %s", path, e)
+                    return False
+        return True
+
     async def merge_branch(self, repo_name: str, head: str, base: str = "main") -> Dict[str, Any]:
         """
         Merge a branch into the base branch using GitHub's merge API.
@@ -439,57 +470,3 @@ class GitOperations:
                 shutil.copytree(item, dest_item)
             else:
                 shutil.copy2(item, dest_item)
-
-    async def merge_branch(self, head: str, base: str = "main") -> Dict[str, Any]:
-        """
-        Merge a branch into the base branch using GitHub's merge API.
-        Returns: {"status": "merged" | "conflict" | "error", "message": str, "data": ...}
-        """
-        try:
-            url = f"{self.api_base}/repos/{self.username}/{self.repo}/merges"
-            payload = {
-                "base": base,
-                "head": head,
-                "commit_message": f"Merge branch '{head}' into {base}",
-            }
-            resp = await self.client.post(url, json=payload)
-            if resp.status_code in (200, 201):
-                return {"status": "merged", "data": resp.json()}
-            elif resp.status_code == 409:
-                # Conflict or branch protection
-                try:
-                    err = resp.json()
-                except Exception:
-                    err = {"message": resp.text}
-                return {
-                    "status": "conflict",
-                    "message": err.get("message", "Merge conflict"),
-                }
-            elif resp.status_code == 404:
-                return {"status": "error", "message": f"Branch not found: {head}"}
-            elif resp.status_code == 422:
-                # Could be: head == base, no commits between, or branch protection
-                try:
-                    err = resp.json()
-                except Exception:
-                    err = {"message": resp.text}
-                msg = err.get("message", "Merge failed")
-                # "already up to date" or "no commits" - treat as success
-                if "no commits" in msg.lower() or "already" in msg.lower():
-                    return {"status": "merged", "message": msg, "data": err}
-                return {"status": "conflict", "message": msg}
-            else:
-                try:
-                    err = resp.json()
-                except Exception:
-                    err = {"message": resp.text}
-                return {
-                    "status": "error",
-                    "message": err.get("message", f"HTTP {resp.status_code}"),
-                }
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-    async def close(self) -> None:
-        """Close the HTTP client."""
-        await self.client.aclose()

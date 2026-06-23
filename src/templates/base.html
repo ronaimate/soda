@@ -22,8 +22,10 @@
                     </select>
                 </div>
                 {% endif %}
-                <a href="/users" class="nav-link{% if request.url.path == '/users' %} active{% endif %}">Users</a>
                 <a href="/settings" class="nav-link{% if request.url.path == '/settings' %} active{% endif %}">Settings</a>
+                {% if show_advanced_nav %}
+                <a href="/users" class="nav-link{% if request.url.path == '/users' %} active{% endif %}">Users</a>
+                {% endif %}
             </nav>
         </div>
     </header>

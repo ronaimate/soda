@@ -56,14 +56,17 @@ def write_opencode_auth(api_key: str, provider: Optional[str] = None, model: Opt
         logger.debug("No API key provided, skipping auth file write")
         return False
     
-    auth_path = Path("/root/.opencode/auth.json")
+    auth_path = Path("/root/.local/share/opencode/auth.json")
     auth_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    auth_data = {
-        "api_key": api_key,
-        "provider": provider or "openai",
-        "model": model or "gpt-4"
+
+    p = provider or "opencode"
+    auth_data: dict = {
+        "credentials": [{"provider": p, "key": api_key}],
     }
+    if model:
+        auth_data["model"] = model
+    if p != "opencode":
+        auth_data["provider"] = p
     
     try:
         with open(auth_path, 'w') as f:

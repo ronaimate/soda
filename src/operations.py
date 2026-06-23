@@ -182,9 +182,9 @@ async def generate_task_prompt(
 {project.description or ''}
 
 ## Your Task (ONLY work on this):
-|**Title:** {task.title}
-|**Description:** {task.description or '(no description)'}
-|**Complexity:** {task.complexity or 'not specified'}
+**Title:** {task.title}
+**Description:** {task.description or '(no description)'}
+**Complexity:** {task.complexity or 'not specified'}
 
 ## Other tasks in this project (DO NOT work on these — they are separate tasks):
 {remaining_summary if remaining_summary else '(none)'}

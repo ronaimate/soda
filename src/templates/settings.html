@@ -2,152 +2,65 @@
 {% block content %}
 <div class="page-header">
     <h1>⚙ Settings</h1>
+    <p class="help-text">Update API keys when they expire, enable extra providers, or change models. <a href="/setup">Open setup wizard</a></p>
 </div>
 
 <div class="settings-form">
     <form onsubmit="return saveSettings(event)">
 
         <h3>🤖 AI Providers</h3>
-        <p class="help-text">Configure one or more AI providers. Users can be assigned to any enabled provider.</p>
+        <p class="help-text">Enable the providers you use. Leave a key field blank to keep the existing key.</p>
 
-        <div class="provider-card" data-provider="opencode">
-            <div class="provider-header">
-                <label class="provider-toggle">
-                    <input type="checkbox" name="provider_opencode_enabled" value="true" {% if settings.get('provider_opencode_enabled', 'false') == 'true' %}checked{% endif %}>
-                    <strong>OpenCode (CLI)</strong>
-                </label>
-            </div>
+        <div class="provider-card">
+            <label class="provider-toggle">
+                <input type="checkbox" name="provider_opencode_enabled" value="true" {% if settings.get('provider_opencode_enabled', 'false') == 'true' %}checked{% endif %}>
+                <strong>OpenCode</strong>
+            </label>
             <label style="margin-top:8px">API Key</label>
-            <input type="password" name="opencode_api_key" value="{{ settings.get('opencode_api_key', '') }}" placeholder="sk-..." class="input-mono" autocomplete="off">
-            <p class="help-text">Injected as <code>OPENCODE_API_KEY</code> when running OpenCode CLI.</p>
+            <input type="password" name="opencode_api_key" placeholder="Leave blank to keep existing" class="input-mono" autocomplete="off">
         </div>
 
-        <div class="provider-card" data-provider="openrouter" style="margin-top:12px">
-            <div class="provider-header">
-                <label class="provider-toggle">
-                    <input type="checkbox" name="provider_openrouter_enabled" value="true" {% if settings.get('provider_openrouter_enabled', 'true') == 'true' %}checked{% endif %}>
-                    <strong>OpenRouter</strong>
-                </label>
-            </div>
+        <div class="provider-card" style="margin-top:12px">
+            <label class="provider-toggle">
+                <input type="checkbox" name="provider_openrouter_enabled" value="true" {% if settings.get('provider_openrouter_enabled', 'false') == 'true' %}checked{% endif %}>
+                <strong>OpenRouter</strong>
+            </label>
             <label style="margin-top:8px">API Key</label>
-            <input type="password" name="openrouter_api_key" value="{{ settings.get('openrouter_api_key', '') }}" placeholder="sk-or-v1-..." class="input-mono" autocomplete="off">
-            <p class="help-text">Get your key at <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a></p>
+            <input type="password" name="openrouter_api_key" placeholder="Leave blank to keep existing" class="input-mono" autocomplete="off">
         </div>
 
-        <div class="provider-card" data-provider="minimax" style="margin-top:12px">
-            <div class="provider-header">
-                <label class="provider-toggle">
-                    <input type="checkbox" name="provider_minimax_enabled" value="true" {% if settings.get('provider_minimax_enabled', 'false') == 'true' %}checked{% endif %}>
-                    <strong>Minimax</strong>
-                </label>
-            </div>
+        <div class="provider-card" style="margin-top:12px">
+            <label class="provider-toggle">
+                <input type="checkbox" name="provider_minimax_enabled" value="true" {% if settings.get('provider_minimax_enabled', 'false') == 'true' %}checked{% endif %}>
+                <strong>Minimax</strong>
+            </label>
             <label style="margin-top:8px">API Key</label>
-            <input type="password" name="minimax_api_key" value="{{ settings.get('minimax_api_key', '') }}" placeholder="..." class="input-mono" autocomplete="off">
+            <input type="password" name="minimax_api_key" placeholder="Leave blank to keep existing" class="input-mono" autocomplete="off">
         </div>
 
-        <h3 style="margin-top:24px">🔧 Git Integration</h3>
-        <p class="help-text">Required for project repo creation, commit/push, and PR workflows.</p>
+        <label style="margin-top:16px">Default provider (Architect + Coder)</label>
+        <select name="primary_ai_provider">
+            <option value="opencode" {% if settings.get('primary_ai_provider', 'opencode') == 'opencode' %}selected{% endif %}>OpenCode</option>
+            <option value="openrouter" {% if settings.get('primary_ai_provider') == 'openrouter' %}selected{% endif %}>OpenRouter</option>
+            <option value="minimax" {% if settings.get('primary_ai_provider') == 'minimax' %}selected{% endif %}>Minimax</option>
+        </select>
 
-        <label>GitHub Username</label>
-        <input type="text" name="git_username" value="{{ settings.get('git_username', '') }}" placeholder="your-github-username" class="input-mono">
+        <label style="margin-top:16px">Planning model (Architect)</label>
+        <input type="text" name="planning_model" value="{{ settings.get('planning_model', 'anthropic/claude-sonnet-4') }}" class="input-mono">
 
-        <label>GitHub Personal Access Token (PAT)</label>
-        <input type="password" name="git_token" value="{{ settings.get('git_token', '') }}" placeholder="ghp_xxxx..." class="input-mono">
-        <div class="info-box">
-            <strong>Required Permissions:</strong>
-            <ul>
-                <li><strong>Classic PAT:</strong> <code>repo</code> scope</li>
-                <li><strong>Fine-grained PAT:</strong> <code>Contents: Read and write</code> + <code>Metadata: Read</code></li>
-            </ul>
-            <p>Create at: <a href="https://github.com/settings/tokens" target="_blank">github.com/settings/tokens</a></p>
-        </div>
+        <label style="margin-top:12px">Coding model (Coder)</label>
+        <input type="text" name="coding_model" value="{{ settings.get('coding_model', 'deepseek/deepseek-chat') }}" class="input-mono">
 
-        <label>Default Branch</label>
-        <input type="text" name="git_default_branch" value="{{ settings.get('git_default_branch', 'main') }}" placeholder="main" class="input-mono">
-        <p class="help-text">Default branch name for new repositories.</p>
+        <h3 style="margin-top:24px">🔧 GitHub</h3>
+        <p class="help-text">Token needs <code>repo</code> scope. Username is auto-detected when you save a new token.</p>
 
-        <h3 style="margin-top:24px">📡 Callback</h3>
-        <label>Callback URL</label>
-        <input type="text" name="callback_url" value="{{ settings.get('callback_url', 'http://localhost:8000/api/callback') }}" class="input-mono">
-        <p class="help-text">Available in execute command templates as <code>&#123;&#123;callback.url&#125;&#125;</code>.</p>
+        <label>Personal Access Token</label>
+        <input type="password" name="git_token" placeholder="Leave blank to keep existing" class="input-mono" autocomplete="off">
 
         <button type="submit" class="btn btn-primary" style="margin-top:24px">Save Settings</button>
         <span id="save-indicator" style="display:none; margin-left:12px; color:var(--green)">✓ Saved</span>
     </form>
-    </div>
-
-    <!-- ── Operations Editor (separate form) ── -->
-    <div class="settings-form" style="margin-top:24px">
-        <h3>⚡ Operation Commands</h3>
-        <p class="help-text">These commands define what happens when an operation is executed. Template variables: <code>{{task.id}}</code>, <code>{{task.title}}</code>, <code>{{task.description}}</code>, <code>{{task.prompt}}</code>, <code>{{task.workdir}}</code>, <code>{{project.name}}</code>, <code>{{callback.url}}</code></p>
-
-        <div id="ops-list">
-            <p class="help-text">Loading operation commands...</p>
-        </div>
-    </div>
-
-<script>
-async function saveSettings(e) {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const res = await fetch('/api/settings', { method: 'PATCH', body: fd });
-    if (res.ok) {
-        const ind = document.getElementById('save-indicator');
-        ind.style.display = 'inline';
-        setTimeout(() => ind.style.display = 'none', 2000);
-    } else {
-        const err = await res.json();
-        alert('Failed to save settings: ' + (err.detail || JSON.stringify(err)));
-    }
-    return false;
-}
-
-// Load operation commands
-async function loadOperations() {
-    const res = await fetch('/api/operations');
-    const ops = await res.json();
-    const container = document.getElementById('ops-list');
-    if (!ops || Object.keys(ops).length === 0) {
-        container.innerHTML = '<p class="help-text">No operations configured. Using defaults.</p>';
-        return;
-    }
-    let html = '';
-    for (const [op, info] of Object.entries(ops)) {
-        const label = op === 'task_run' ? 'Task Run Command' : op === 'op_cmd_merge' ? 'Merge Command' : op;
-        const help = op === 'task_run'
-            ? "Executed when a task is moved to Running. Use {{task.prompt}} for the AI prompt."
-            : op === 'op_cmd_merge'
-            ? "Executed when merging a task's branch into the default branch."
-            : '';
-        html += `<div class="form-group" style="margin-top:16px">
-            <label><strong>${label}</strong> <span class="help-text">(${help})</span></label>
-            <textarea id="op-cmd-${op}" rows="4" class="input-mono" style="width:100%; font-family:monospace; font-size:13px;">${info.value}</textarea>
-            <p class="help-text">Default: <code>${info.default}</code></p>
-            <button type="button" class="btn btn-sm" onclick="saveOperation('${op}')" style="margin-top:4px">Save</button>
-            <button type="button" class="btn btn-sm" onclick="resetOperation('${op}', \`${info.default.replace(/`/g, '\\`')}\`)" style="margin-top:4px; margin-left:4px">Reset to Default</button>
-        </div>`;
-    }
-    container.innerHTML = html;
-}
-
-async function saveOperation(op) {
-    const value = document.getElementById(`op-cmd-${op}`).value;
-    const res = await fetch(`/api/operations/${op}`, {
-        method: 'PATCH',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({value})
-    });
-    if (res.ok) alert('Saved!');
-    else alert('Failed to save');
-}
-
-function resetOperation(op, defaultValue) {
-    document.getElementById(`op-cmd-${op}`).value = defaultValue;
-}
-
-loadOperations();
-</script>
-{% endblock %}
+</div>
 
 <style>
 .provider-card {
@@ -156,11 +69,6 @@ loadOperations();
     border-radius: var(--radius);
     padding: 12px 16px;
     margin-bottom: 8px;
-}
-.provider-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
 }
 .provider-toggle {
     display: flex;
@@ -174,9 +82,9 @@ loadOperations();
 <script>
 async function saveSettings(e) {
     e.preventDefault();
-    const fd = new FormData(e.target);
-    // Normalize checkboxes: always send value, even if unchecked
-    for (const cb of e.target.querySelectorAll('input[type="checkbox"]')) {
+    const form = e.target;
+    const fd = new FormData(form);
+    for (const cb of form.querySelectorAll('input[type="checkbox"]')) {
         if (!cb.checked) fd.set(cb.name, 'false');
     }
     const res = await fetch('/api/settings', { method: 'PATCH', body: fd });
