@@ -1,20 +1,60 @@
 {% extends "base.html" %}
 {% block content %}
+{% set wizard_mode = not project.advanced_mode %}
+{% set is_complete = pipeline.pipeline_state == 'complete' %}
+{% set read_only_board = wizard_mode or is_complete %}
+
+{% if is_complete %}
+<div class="pipeline-complete-banner">
+    <span class="complete-icon" aria-hidden="true">🎉</span>
+    <div class="complete-text">
+        <strong>All done!</strong>
+        <span class="help-text">Every step of <strong>{{ project.name }}</strong> is complete.</span>
+    </div>
+    <div class="complete-actions">
+        {% if project.repo_url %}
+        <a class="btn btn-primary btn-sm" href="{{ project.repo_url }}" target="_blank" rel="noopener">View on GitHub</a>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <div class="page-header">
     <div class="header-with-actions">
         <h1>{{ project.name }}</h1>
+        {% if not wizard_mode %}
         <div class="header-actions">
-            <button class="btn btn-sm" onclick="showEditProject()">⚙ Edit</button>
-            <button class="btn btn-primary btn-sm" onclick="showCreateTask()">+ Task</button>
-            <button class="btn btn-sm" style="background:#ef4444" onclick="showCreateBug()">🐛 Bug</button>
+            <button class="btn btn-primary btn-sm" onclick="showExpandModal('idea')">+ Idea</button>
+            <button class="btn btn-sm" style="background:#ef4444" onclick="showExpandModal('bug')">🐛 Bug</button>
             <button class="btn btn-sm btn-danger" onclick="deleteProject({{ project.id }})">🗑 Delete</button>
         </div>
+        {% endif %}
     </div>
     {% if project.description %}<p class="project-desc">{{ project.description }}</p>{% endif %}
-    {% if project.repo_name %}<p class="help-text">📦 Repo: <code>{{ project.repo_name }}</code> | Branch: <code>{{ project.repo_default_branch or 'main' }}</code></p>{% endif %}
 </div>
 
-<div class="board" id="board">
+<div class="pipeline-bar" id="pipeline-bar">
+    <div class="pipeline-progress">
+        <span class="pipeline-label">{{ done_count }} / {{ total_count }} done</span>
+        <div class="progress-track">
+            <div class="progress-fill" style="width:{% if total_count %}{{ (done_count * 100 / total_count)|round }}{% else %}0{% endif %}%"></div>
+        </div>
+    </div>
+    <div class="pipeline-controls">
+        <span class="badge pipeline-mode-badge" id="pipeline-mode-badge">
+            {% if pipeline.run_mode == 'auto' %}⚡ Auto{% else %}👣 Step by step{% endif %}
+        </span>
+        <span class="badge pipeline-state-badge" id="pipeline-state-badge">{{ pipeline.pipeline_state }}</span>
+        <button class="btn btn-primary btn-sm" id="btn-pipeline-next" onclick="pipelineNext()" style="display:none">Next step</button>
+        <button class="btn btn-sm" id="btn-pipeline-pause" onclick="pipelinePause()">Pause</button>
+        <button class="btn btn-sm btn-primary" id="btn-pipeline-resume" onclick="pipelineResume()" style="display:none">Resume</button>
+        <button class="btn btn-sm" onclick="showExpandModal('idea')">+ Idea</button>
+        <button class="btn btn-sm" style="background:#ef4444" onclick="showExpandModal('bug')">🐛 Bug</button>
+        <button class="btn btn-sm" onclick="toggleAdvancedMode(true)" title="Manual kanban">Advanced</button>
+    </div>
+</div>
+
+<div class="board {% if read_only_board %}board-wizard{% endif %}" id="board">
     {% for col in ['backlog', 'running', 'blocked', 'review', 'done'] %}
     <div class="column" data-column="{{ col }}">
         <div class="column-header">
@@ -22,18 +62,18 @@
                 {% if col == 'backlog' %}📋 Backlog
                 {% elif col == 'running' %}▶️ Running
                 {% elif col == 'blocked' %}❓ Blocked
-                {% elif col == 'review' %}👁️ Review
+                {% elif col == 'review' %}{% if auto_integrate %}🔍 Checking{% else %}👁️ Review{% endif %}
                 {% elif col == 'done' %}✅ Done
                 {% endif %}
             </h3>
             <span class="task-count">{{ tasks|selectattr('board_column', 'equalto', col)|list|length }}</span>
         </div>
-        <div class="card-list" data-column="{{ col }}" ondrop="drop(event)" ondragover="allowDrop(event)">
+        <div class="card-list" data-column="{{ col }}" {% if not read_only_board %}ondrop="drop(event)" ondragover="allowDrop(event)"{% endif %}>
             {% for task in tasks if task.board_column == col %}
-            <div class="task-card {% if not task.assignee_id %}task-unassigned{% endif %} {% if task.is_bug %}task-bug{% endif %} {% if task.is_running %}running-task{% endif %}"
-                 draggable="true"
-                 ondragstart="drag(event)"
+            <div class="task-card {% if not task.assignee_id %}task-unassigned{% endif %} {% if task.is_bug %}task-bug{% endif %} {% if task.is_running %}running-task{% endif %} {% if task.has_unmet_deps %}task-waiting-deps{% endif %}"
+                 {% if not read_only_board %}draggable="true" ondragstart="drag(event)"{% endif %}
                  data-task-id="{{ task.id }}"
+                 data-unmet-deps="{{ 'true' if task.has_unmet_deps else 'false' }}"
                  onclick="showTaskDetail({{ task.id }})">
                 <div class="card-header">
                     <span class="card-title">
@@ -42,6 +82,18 @@
                         {{ task.title }}
                     </span>
                 </div>
+                {% if task.has_unmet_deps and task.unmet_dep_titles %}
+                <p class="help-text task-deps-hint" title="Complete these tasks first">⏳ Needs: {{ task.unmet_dep_titles|join(', ') }}</p>
+                {% endif %}
+                {% if col == 'blocked' and task.block_reason %}
+                <p class="help-text task-block-hint" title="{{ task.block_reason }}">⚠️ {{ task.block_reason }}</p>
+                {% endif %}
+                {% if col == 'blocked' and wizard_mode and task.block_reason and 'Watchdog' in task.block_reason %}
+                <button class="btn btn-sm btn-primary" style="margin-top:6px;width:100%" onclick="event.stopPropagation(); finishTask({{ task.id }})">Finish & integrate</button>
+                {% endif %}
+                {% if col == 'review' and auto_integrate %}
+                <button class="btn btn-sm btn-primary" style="margin-top:6px;width:100%" onclick="event.stopPropagation(); integrateTask({{ task.id }})">Verify & finish</button>
+                {% endif %}
                 {% if task.complexity %}
                 <span class="badge complexity-{{ task.complexity|lower }}">{{ task.complexity }}</span>
                 {% endif %}
@@ -70,84 +122,16 @@
     </div>
 </div>
 
-<!-- Edit Project Modal -->
-<div id="edit-project-modal" class="modal" style="display:none">
+<!-- Expand (Idea / Bug) Modal -->
+<div id="expand-modal" class="modal" style="display:none">
     <div class="modal-content">
-        <span class="modal-close" onclick="closeModal('edit-project-modal')">&times;</span>
-        <h2>Edit Project</h2>
-        <form id="edit-project-form" onsubmit="return updateProject(event)">
-            <label>Name</label>
-            <input type="text" name="name" value="{{ project.name }}" required>
-            <label>Description</label>
-            <textarea name="description">{{ project.description or '' }}</textarea>
-            <label>Merger (handles PRs/review)</label>
-            <select name="merger_user_id">
-                <option value="">None</option>
-                {% for u in users if 'merger' in (u.task_types or []) %}
-                <option value="{{ u.id }}" {% if project.merger_user_id == u.id %}selected{% endif %}>{{ u.name }}</option>
-                {% endfor %}
-            </select>
-            <button type="submit" class="btn btn-primary">Save</button>
-        </form>
-    </div>
-</div>
-
-<!-- Create Task Modal -->
-<div id="create-task-modal" class="modal" style="display:none">
-    <div class="modal-content">
-        <span class="modal-close" onclick="closeModal('create-task-modal')">&times;</span>
-        <h2>New Task</h2>
-        <form onsubmit="return createTask(event)">
-            <label>Title</label>
-            <input type="text" name="title" required>
-            <label>Description</label>
-            <textarea name="description" rows="4"></textarea>
-            <label>Complexity</label>
-            <select name="complexity" onchange="updateAssigneeHint()">
-                <option value="">None</option>
-                <option value="XS">XS — small, Junior dev</option>
-                <option value="S">S — small, Junior dev</option>
-                <option value="M">M — medium, Medior dev</option>
-                <option value="L">L — large, Medior dev</option>
-                <option value="XL">XL — extra large, Senior dev</option>
-            </select>
-            <p class="help-text" id="assignee-hint">Pick a complexity to auto-assign.</p>
-            <label>Assignee (override)</label>
-            <select name="assignee_id">
-                <option value="">Auto (based on complexity)</option>
-                {% for u in users %}
-                <option value="{{ u.id }}">{{ u.name }} ({{ u.type }})</option>
-                {% endfor %}
-            </select>
-            <button type="submit" class="btn btn-primary" style="margin-top:16px">Create</button>
-        </form>
-    </div>
-</div>
-
-<!-- Create Bug Modal -->
-<div id="create-bug-modal" class="modal" style="display:none">
-    <div class="modal-content">
-        <span class="modal-close" onclick="closeModal('create-bug-modal')">&times;</span>
-        <h2>🐛 Report a Bug</h2>
-        <form onsubmit="return createBug(event)">
-            <label>Bug Title</label>
-            <input type="text" name="title" required placeholder="e.g. Login button doesn't work">
-            <label>Description (what's broken?)</label>
-            <textarea name="description" rows="3" placeholder="Describe the bug..."></textarea>
-            <label>Reproduction Questions</label>
-            <p class="help-text" style="margin-bottom:8px">Add clarifying questions to help developers reproduce the bug.</p>
-            <div id="bug-questions-list"></div>
-            <button type="button" class="btn btn-sm" onclick="addBugQuestion()">+ Add Question</button>
-            <label style="margin-top:16px">Complexity (auto-assigns developer)</label>
-            <select name="complexity">
-                <option value="S" selected>S</option>
-                <option value="M">M</option>
-                <option value="L">L</option>
-                <option value="XL">XL</option>
-                <option value="XS">XS</option>
-            </select>
-            <input type="hidden" name="is_bug" value="true">
-            <button type="submit" class="btn btn-primary" style="margin-top:16px; background:#ef4444">Report Bug</button>
+        <span class="modal-close" onclick="closeModal('expand-modal')">&times;</span>
+        <h2 id="expand-modal-title">+ Idea</h2>
+        <p class="help-text" id="expand-modal-hint">Describe what you want — the Architect will create relevant tasks.</p>
+        <form onsubmit="return submitExpand(event)">
+            <textarea name="message" id="expand-message" rows="5" required placeholder="e.g. Add dark mode toggle, or: the drag drop stops working on mobile..."></textarea>
+            <input type="hidden" name="kind" id="expand-kind" value="idea">
+            <button type="submit" class="btn btn-primary" id="expand-submit-btn" style="margin-top:16px">Create tasks</button>
         </form>
     </div>
 </div>
@@ -174,6 +158,9 @@
 
 <style>
 .task-bug { border-left: 3px solid #ef4444 !important; }
+.task-waiting-deps { opacity: 0.65; }
+.task-deps-hint { font-size: 11px; margin: 4px 0 0; color: var(--text2); }
+.task-block-hint { font-size: 11px; margin: 4px 0 0; color: #f59e0b; }
 .complexity-xs, .complexity-s { background: #22c55e; color: white; }
 .complexity-m, .complexity-l { background: #f59e0b; color: white; }
 .complexity-xl { background: #ef4444; color: white; }
@@ -181,41 +168,167 @@
 .ai-summary-comment { background: #1a3a2a !important; border-left: 3px solid #10b981 !important; }
 .error-comment { background: #3a1a1a !important; border-left: 3px solid #ef4444 !important; }
 .user-comment { background: var(--bg2) !important; }
+.pipeline-bar {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 16px 20px; margin-bottom: 20px; background: var(--bg2); border-radius: var(--radius);
+    border: 1px solid var(--border);
+}
+.pipeline-progress { flex: 1; min-width: 200px; }
+.pipeline-label { font-size: 13px; color: var(--text2); display: block; margin-bottom: 6px; }
+.progress-track { height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, #3b82f6, #22c55e); transition: width 0.3s; }
+.pipeline-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pipeline-complete-banner {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px;
+    margin-bottom: 20px; padding: 16px 20px;
+    background: linear-gradient(135deg, rgba(34,197,94,0.12), rgba(59,130,246,0.08));
+    border: 1px solid rgba(34,197,94,0.35); border-radius: 12px;
+}
+.pipeline-complete-banner .complete-icon { font-size: 2em; line-height: 1; }
+.pipeline-complete-banner .complete-text { flex: 1; min-width: 180px; }
+.pipeline-complete-banner .complete-text strong { display: block; font-size: 1.1em; margin-bottom: 2px; }
+.pipeline-complete-banner .complete-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.board-wizard .task-card { cursor: pointer; }
+.board-wizard .column-header h3 { font-size: 14px; }
 </style>
 
 <script>
-function showCreateTask() {
-    document.getElementById('create-task-modal').style.display = 'flex';
-    updateAssigneeHint();
-}
-function showCreateBug() {
-    document.getElementById('create-bug-modal').style.display = 'flex';
-    document.getElementById('bug-questions-list').innerHTML = '';
-    addBugQuestion();
-}
-function addBugQuestion() {
-    const list = document.getElementById('bug-questions-list');
-    const idx = list.children.length;
-    const div = document.createElement('div');
-    div.style.cssText = 'display:flex; gap:4px; margin-bottom:4px;';
-    div.innerHTML = `<input type="text" class="bug-q" placeholder="Question ${idx+1}..." style="flex:1">
-        <button type="button" onclick="this.parentElement.remove()" style="background:#ef4444; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer;">×</button>`;
-    list.appendChild(div);
+const PROJECT_ID = {{ project.id }};
+const WIZARD_MODE = {{ 'true' if wizard_mode else 'false' }};
+const IS_COMPLETE = {{ 'true' if is_complete else 'false' }};
+const READ_ONLY = WIZARD_MODE || IS_COMPLETE;
+const AUTO_INTEGRATE = {{ 'true' if auto_integrate else 'false' }};
+const PIPELINE = {{ pipeline|tojson }};
+
+function updatePipelineUI(status) {
+    const modeBadge = document.getElementById('pipeline-mode-badge');
+    const stateBadge = document.getElementById('pipeline-state-badge');
+    const btnNext = document.getElementById('btn-pipeline-next');
+    const btnPause = document.getElementById('btn-pipeline-pause');
+    const btnResume = document.getElementById('btn-pipeline-resume');
+    if (!modeBadge) return;
+
+    modeBadge.textContent = status.run_mode === 'auto' ? '⚡ Auto' : '👣 Step by step';
+    const stateLabels = {
+        idle: 'Ready', running: 'Running', paused: 'Paused',
+        waiting_user: 'Waiting for you', complete: 'Complete'
+    };
+    stateBadge.textContent = stateLabels[status.pipeline_state] || status.pipeline_state;
+
+    const isRunning = status.pipeline_state === 'running';
+    const isPaused = status.pipeline_state === 'paused' || status.pipeline_state === 'idle';
+    const isWaiting = status.pipeline_state === 'waiting_user';
+    const isStep = status.run_mode === 'step';
+
+    btnNext.style.display = (isStep && isPaused && !isRunning && status.next_task_id) ? 'inline-block' : 'none';
+    btnPause.style.display = (isRunning || (isStep && status.pipeline_state === 'idle')) ? 'inline-block' : 'none';
+    btnResume.style.display = (isPaused && !isStep && !isRunning) ? 'inline-block' : 'none';
+    if (status.pipeline_state === 'complete') {
+        btnNext.style.display = 'none';
+        btnPause.style.display = 'none';
+        btnResume.style.display = 'none';
+        stateBadge.textContent = 'Complete';
+        stateBadge.style.background = '#22c55e';
+    } else if (isWaiting) {
+        btnPause.style.display = 'none';
+        btnNext.style.display = 'none';
+        stateBadge.textContent = 'Needs your attention';
+        stateBadge.style.background = '#f59e0b';
+    } else {
+        stateBadge.style.background = '';
+    }
 }
 
-async function updateAssigneeHint() {
-    const complexity = document.querySelector('#create-task-modal select[name="complexity"]').value;
-    const hint = document.getElementById('assignee-hint');
-    if (!complexity) { hint.textContent = 'Pick a complexity to auto-assign.'; return; }
-    try {
-        const res = await fetch('/api/sizes');
+async function pipelineNext() {
+    const res = await fetch(`/api/projects/${PROJECT_ID}/pipeline/next`, { method: 'POST' });
+    if (res.ok) { updatePipelineUI(await res.json()); setTimeout(() => window.location.reload(), 800); }
+    else { alert('Could not start next step'); }
+}
+
+async function pipelinePause() {
+    const res = await fetch(`/api/projects/${PROJECT_ID}/pipeline/pause`, { method: 'POST' });
+    if (res.ok) updatePipelineUI(await res.json());
+}
+
+async function pipelineResume() {
+    const res = await fetch(`/api/projects/${PROJECT_ID}/pipeline/resume`, { method: 'POST' });
+    if (res.ok) {
         const data = await res.json();
-        const size = data.sizes[complexity.toLowerCase()];
-        if (size) hint.textContent = `Will be assigned to: ${size.user_name}`;
-        else hint.textContent = 'No user assigned to this complexity.';
-    } catch (e) {
-        hint.textContent = 'Could not load assignee info.';
+        updatePipelineUI(data);
+        if (data.run_mode === 'auto') setTimeout(() => window.location.reload(), 800);
     }
+}
+
+async function toggleAdvancedMode(on) {
+    const res = await fetch(`/api/projects/${PROJECT_ID}/advanced`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ advanced_mode: !!on })
+    });
+    if (res.ok) window.location.reload();
+}
+
+if (document.getElementById('pipeline-bar')) {
+    updatePipelineUI(PIPELINE);
+    setInterval(async () => {
+        try {
+            const res = await fetch(`/api/projects/${PROJECT_ID}/pipeline`);
+            if (res.ok) {
+                const s = await res.json();
+                updatePipelineUI(s);
+                if (s.pipeline_state === 'complete' && !IS_COMPLETE) window.location.reload();
+            }
+        } catch (e) {}
+    }, 5000);
+}
+function showExpandModal(kind) {
+    document.getElementById('expand-kind').value = kind;
+    document.getElementById('expand-message').value = '';
+    const title = document.getElementById('expand-modal-title');
+    const hint = document.getElementById('expand-modal-hint');
+    const btn = document.getElementById('expand-submit-btn');
+    if (kind === 'bug') {
+        title.textContent = '🐛 Report a bug';
+        hint.textContent = 'Describe what\'s broken — the Architect reviews the project and creates fix tasks.';
+        btn.textContent = 'Create fix tasks';
+        btn.style.background = '#ef4444';
+    } else {
+        title.textContent = '+ Idea';
+        hint.textContent = 'Describe what you want — the Architect creates relevant tasks, like at project start.';
+        btn.textContent = 'Create tasks';
+        btn.style.background = '';
+    }
+    document.getElementById('expand-modal').style.display = 'flex';
+    document.getElementById('expand-message').focus();
+}
+
+async function submitExpand(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const btn = document.getElementById('expand-submit-btn');
+    btn.disabled = true;
+    btn.textContent = 'Thinking…';
+    try {
+        const res = await fetch(`/api/projects/${PROJECT_ID}/expand`, { method: 'POST', body: fd });
+        if (!res.ok) {
+            const err = await res.json();
+            alert(err.detail || 'Failed');
+            return false;
+        }
+        closeModal('expand-modal');
+        const poll = setInterval(async () => {
+            const st = await fetch(`/api/projects/${PROJECT_ID}/expand/status`);
+            const data = await st.json();
+            if (!data.generating) {
+                clearInterval(poll);
+                window.location.reload();
+            }
+        }, 2000);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = fd.get('kind') === 'bug' ? 'Create fix tasks' : 'Create tasks';
+    }
+    return false;
 }
 
 function allowDrop(e) { e.preventDefault(); }
@@ -225,10 +338,18 @@ function drag(e) {
 }
 
 async function drop(e) {
+    if (READ_ONLY) return;
     e.preventDefault();
     const taskId = e.dataTransfer.getData('taskId');
     const column = e.currentTarget.dataset.column;
     if (!taskId || !column) return;
+    if (column === 'running') {
+        const card = document.querySelector(`.task-card[data-task-id="${taskId}"]`);
+        if (card && card.dataset.unmetDeps === 'true') {
+            alert('Complete the prerequisite tasks first (see ⏳ Needs on the card).');
+            return;
+        }
+    }
     await moveTaskAction(taskId, column);
 }
 
@@ -305,22 +426,71 @@ async function showTaskDetail(taskId) {
     </div>`;
 
     // Action buttons based on column
-    html += `<div class="task-actions" style="margin-top:16px; display:flex; flex-wrap:wrap; gap:8px;">
+    html += `<div class="task-actions" style="margin-top:16px; display:flex; flex-wrap:wrap; gap:8px;">`;
+    if (READ_ONLY) {
+        if (task.column === 'blocked') {
+            const hasAI = (task.comments || []).some(c => c.author === 'AI');
+            const watchdog = (task.comments || []).some(c => (c.content || '').includes('Watchdog'));
+            if (hasAI || watchdog) {
+                html += `<button class="btn btn-sm btn-primary" onclick="finishTask(${taskId}); event.stopPropagation();">Finish & integrate</button>`;
+            } else {
+                html += `<button class="btn btn-sm btn-primary" onclick="continueBlockedTask(${taskId}); event.stopPropagation();">Continue</button>`;
+            }
+        }
+        if (AUTO_INTEGRATE && task.column === 'review') {
+            html += `<button class="btn btn-sm btn-primary" onclick="integrateTask(${taskId}); event.stopPropagation();">Verify & finish</button>`;
+        }
+    } else {
+        html += `
         <button class="btn btn-sm" onclick="moveTaskAction(${taskId}, 'backlog'); event.stopPropagation();">← Backlog</button>
         <button class="btn btn-sm" onclick="moveTaskAction(${taskId}, 'running'); event.stopPropagation();">▶ Running</button>
         <button class="btn btn-sm" onclick="moveTaskAction(${taskId}, 'blocked'); event.stopPropagation();">❓ Blocked</button>
         <button class="btn btn-sm" onclick="moveTaskAction(${taskId}, 'review'); event.stopPropagation();">👁 Review</button>
         <button class="btn btn-sm btn-success" onclick="moveTaskAction(${taskId}, 'done'); event.stopPropagation();">✓ Done</button>
         <button class="btn btn-sm btn-danger" onclick="deleteTask(${taskId}); event.stopPropagation();">🗑 Delete</button>`;
-    if (task.column === 'review') {
-        html += `<button class="btn btn-sm" style="background:#8b5cf6" onclick="showMergeModal(${taskId}); event.stopPropagation();">🔀 Merge</button>`;
-    }
-    if (task.column === 'blocked') {
-        html += `<button class="btn btn-sm" style="background:#10b981" onclick="moveTaskAction(${taskId}, 'running'); event.stopPropagation();">↻ Re-run with answers</button>`;
+        if (task.column === 'review') {
+            html += `<button class="btn btn-sm" style="background:#8b5cf6" onclick="showMergeModal(${taskId}); event.stopPropagation();">🔀 Merge</button>`;
+        }
+        if (task.column === 'blocked') {
+            html += `<button class="btn btn-sm" style="background:#10b981" onclick="moveTaskAction(${taskId}, 'running'); event.stopPropagation();">↻ Re-run with answers</button>`;
+        }
     }
     html += `</div></div>`;
     content.innerHTML = html;
     modal.style.display = 'flex';
+}
+
+async function integrateTask(taskId) {
+    if (!confirm('Run Architect verification and finish this step?')) return;
+    const res = await fetch(`/api/tasks/${taskId}/integrate`, { method: 'POST' });
+    if (res.ok) {
+        window.location.reload();
+    } else {
+        const err = await res.json();
+        alert(err.detail || 'Integration failed');
+    }
+}
+
+async function finishTask(taskId) {
+    const res = await fetch(`/api/tasks/${taskId}/finish`, { method: 'POST' });
+    if (res.ok) {
+        window.location.reload();
+    } else {
+        const err = await res.json();
+        alert(err.detail || 'Finish failed');
+    }
+}
+
+async function continueBlockedTask(taskId) {
+    const res = await fetch(`/api/tasks/${taskId}`);
+    const task = await res.json();
+    const hasAI = (task.comments || []).some(c => c.author === 'AI');
+    const watchdog = (task.comments || []).some(c => (c.content || '').includes('Watchdog'));
+    if (hasAI || watchdog) {
+        await finishTask(taskId);
+    } else {
+        await moveTaskAction(taskId, 'running');
+    }
 }
 
 function showMergeModal(taskId) {
@@ -381,27 +551,6 @@ async function updateTaskAssignee(taskId, assigneeId) {
     await fetch(`/api/tasks/${taskId}`, { method: 'PATCH', body: fd });
 }
 
-async function createTask(e) {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    fd.append('project_id', {{ project.id }});
-    const res = await fetch(`/api/projects/{{ project.id }}/tasks`, { method: 'POST', body: fd });
-    if (res.ok) { closeModal('create-task-modal'); window.location.reload(); }
-    return false;
-}
-
-async function createBug(e) {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    fd.append('project_id', {{ project.id }});
-    // Collect questions
-    const questions = [...document.querySelectorAll('.bug-q')].map(i => i.value.trim()).filter(v => v);
-    if (questions.length) fd.append('questions', JSON.stringify(questions));
-    const res = await fetch(`/api/projects/{{ project.id }}/tasks`, { method: 'POST', body: fd });
-    if (res.ok) { closeModal('create-bug-modal'); window.location.reload(); }
-    return false;
-}
-
 async function deleteTask(taskId) {
     if (!confirm('Delete this task?')) return;
     await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
@@ -413,19 +562,6 @@ async function deleteProject(projectId) {
     if (!confirm('⚠️ Delete this project and ALL its tasks?')) return;
     await fetch(`/api/projects/${projectId}`, { method: 'DELETE' });
     window.location = '/';
-}
-
-function showEditProject() {
-    document.getElementById('edit-project-modal').style.display = 'flex';
-}
-
-async function updateProject(e) {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    await fetch(`/api/projects/{{ project.id }}`, { method: 'PATCH', body: fd });
-    closeModal('edit-project-modal');
-    window.location.reload();
-    return false;
 }
 
 function closeModal(id) {

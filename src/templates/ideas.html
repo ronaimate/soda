@@ -18,7 +18,14 @@
 
         {% if idea.architect_user_id %}
             {% set arch = ai_users|selectattr('id', 'equalto', idea.architect_user_id)|first %}
-            {% if arch %}<div class="idea-architect">Architect: <strong>{{ arch.name }}</strong></div>{% endif %}
+            {% if arch %}<div class="idea-architect">Planning: <strong>Architect</strong></div>{% endif %}
+        {% endif %}
+
+        {% if idea.generation_error %}
+        <div class="idea-error" onclick="event.stopPropagation()">
+            <p class="questions-label" style="color:#ef4444">❌ Generation failed</p>
+            <p class="help-text idea-error-text">{{ idea.generation_error }}</p>
+        </div>
         {% endif %}
 
         {% if idea.questions %}
@@ -35,8 +42,8 @@
         {% endif %}
 
         <div class="idea-actions" onclick="event.stopPropagation()">
-            {% if idea.status == 'active' %}
-                <button class="btn btn-sm btn-primary" onclick="showArchitectSelect({{ idea.id }})">🚀 Generate Project</button>
+            {% if idea.status == 'active' or idea.status == 'error' %}
+                <button class="btn btn-sm btn-primary" onclick="showStartProject({{ idea.id }})">🚀 Start project</button>
             {% elif idea.status == 'generating' %}
                 <span class="badge">⏳ Generating...</span>
             {% elif idea.status == 'generated' %}
@@ -45,8 +52,6 @@
                 {% else %}
                 <span class="badge status-generated">✅ Project created</span>
                 {% endif %}
-            {% elif idea.status == 'error' %}
-                <span class="badge" style="background:#ef4444">❌ Error</span>
             {% endif %}
             <button class="btn btn-sm" onclick="showEditIdea({{ idea.id }}, '{{ idea.title|e }}', '{{ (idea.description or '')|e }}')">Edit</button>
             <button class="btn btn-sm btn-danger" onclick="deleteIdea({{ idea.id }})">Delete</button>
@@ -95,52 +100,40 @@
     <div style="background:var(--bg2); padding:32px; border-radius:var(--radius); text-align:center; max-width:400px;">
         <div style="font-size:2em; margin-bottom:12px;">🤖</div>
         <p id="generate-status-text">Architect is analyzing your idea...</p>
-        <p class="help-text" style="margin-top:8px" id="generate-status-detail">This may take a minute</p>
+        <p class="help-text" style="margin-top:8px" id="generate-status-detail">This may take up to 10 minutes for large projects</p>
     </div>
 </div>
 
-<!-- Architect Select Modal -->
-<div id="architect-select-modal" class="modal" style="display:none">
+<!-- Start Project Modal -->
+<div id="start-project-modal" class="modal" style="display:none">
     <div class="modal-content">
-        <span class="modal-close" onclick="closeModal('architect-select-modal')">&times;</span>
-        <h2>Generate Project</h2>
-        <p class="help-text" style="margin-bottom:16px">Architect AI will break your idea into sequential tasks.</p>
-        <input type="hidden" id="architect-select-idea-id">
+        <span class="modal-close" onclick="closeModal('start-project-modal')">&times;</span>
+        <h2>Start project</h2>
+        <p class="help-text" style="margin-bottom:16px">Architect will plan your idea into sequential steps. Code is saved privately on GitHub.</p>
+        <input type="hidden" id="start-project-idea-id">
 
-        <label>Architect AI</label>
-        <select id="architect-select-user">
-            <option value="">Select an AI user with task_manager role...</option>
-            {% for u in ai_users %}
-            <option value="{{ u.id }}" data-has-tm="{% if 'task_manager' in (u.task_types or []) %}1{% else %}0{% endif %}">
-                {{ u.name }}{% if u.model %} ({{ u.model }}){% endif %}{% if 'task_manager' in (u.task_types or []) %} ⭐{% endif %}
-            </option>
-            {% endfor %}
-        </select>
-        <p class="help-text" id="architect-help"></p>
-
-        <hr style="margin:16px 0; border-color:var(--border);">
-
-        <h3 style="margin-bottom:12px;">📦 GitHub Repository</h3>
-
-        <label>Repository Name</label>
-        <input type="text" id="repo-name" placeholder="my-project-name" style="margin-bottom:8px;">
-        <p class="help-text">Leave empty to auto-generate. Only lowercase letters, numbers, and hyphens.</p>
-
-        <label>Visibility</label>
-        <div style="display:flex; gap:16px; margin:8px 0 16px;">
-            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
-                <input type="radio" name="repo-visibility" value="private" checked>
-                <span>🔒 Private</span>
+        <label>How should tasks run?</label>
+        <div style="display:flex; flex-direction:column; gap:10px; margin:12px 0 20px;">
+            <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; padding:12px; border:1px solid var(--border); border-radius:8px;">
+                <input type="radio" name="run-mode" value="step" checked style="margin-top:4px">
+                <span><strong>Step by step</strong><br><span class="help-text">Pause before each task — click Next when ready.</span></span>
             </label>
-            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
-                <input type="radio" name="repo-visibility" value="public">
-                <span>🌐 Public</span>
+            <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; padding:12px; border:1px solid var(--border); border-radius:8px;">
+                <input type="radio" name="run-mode" value="auto" style="margin-top:4px">
+                <span><strong>Full auto</strong><br><span class="help-text">Tasks run one after another automatically.</span></span>
             </label>
         </div>
 
-        <button class="btn btn-primary" onclick="generateProject()" style="margin-top:8px;">Generate Project</button>
+        <button class="btn btn-primary" onclick="startProject()" style="width:100%">Start project</button>
     </div>
 </div>
+
+<style>
+.idea-error-text {
+    white-space: pre-wrap;
+    margin: 0;
+}
+</style>
 
 <script>
 function navigateToProject(ideaId, status, projectId) {
@@ -189,46 +182,25 @@ async function deleteIdea(ideaId) {
     if (res.ok) window.location.reload();
 }
 
-function showArchitectSelect(ideaId) {
-    document.getElementById('architect-select-idea-id').value = ideaId;
-    const sel = document.getElementById('architect-select-user');
-    // Auto-select a user with task_manager role
-    let autoSelected = false;
-    for (const opt of sel.options) {
-        if (opt.dataset.hasTm === '1') {
-            sel.value = opt.value;
-            autoSelected = true;
-            break;
-        }
-    }
-    document.getElementById('architect-select-modal').style.display = 'flex';
-    if (!autoSelected) {
-        document.getElementById('architect-help').innerHTML = '⚠️ No Task Manager user. <a href="/users">Create one</a> with the "task_manager" task type.';
-    }
+function showStartProject(ideaId) {
+    document.getElementById('start-project-idea-id').value = ideaId;
+    document.getElementById('start-project-modal').style.display = 'flex';
 }
 
-async function generateProject() {
-    const ideaId = document.getElementById('architect-select-idea-id').value;
-    const architectUserId = document.getElementById('architect-select-user').value;
-    const repoName = document.getElementById('repo-name').value.trim();
-    const repoPrivate = document.querySelector('input[name="repo-visibility"]:checked').value === 'private';
-
-    if (!architectUserId) {
-        alert('Please select an Architect AI user.');
-        return;
-    }
-    closeModal('architect-select-modal');
+async function startProject() {
+    const ideaId = document.getElementById('start-project-idea-id').value;
+    const runMode = document.querySelector('input[name="run-mode"]:checked')?.value || 'step';
+    closeModal('start-project-modal');
 
     const overlay = document.getElementById('generate-overlay');
     overlay.style.display = 'flex';
-    document.getElementById('generate-status-text').textContent = 'Architect is analyzing your idea...';
-    document.getElementById('generate-status-detail').textContent = 'This may take up to 2 minutes';
+    document.getElementById('generate-status-text').textContent = 'Architect is planning your project...';
+    document.getElementById('generate-status-detail').textContent = 'This may take up to 10 minutes for large projects';
 
     try {
         const fd = new FormData();
-        fd.append('architect_user_id', architectUserId);
-        fd.append('repo_name', repoName);
-        fd.append('repo_private', repoPrivate ? 'true' : 'false');
+        fd.append('run_mode', runMode);
+        fd.append('repo_private', 'true');
 
         const res = await fetch(`/api/ideas/${ideaId}/generate`, { method: 'POST', body: fd });
         let data;
@@ -256,18 +228,9 @@ async function generateProject() {
             } else if (result.status === 'questions') {
                 window.location.reload();
             } else if (result.status === 'error') {
-                const ideaRes = await fetch(`/api/ideas`);
-                const ideas = await ideaRes.json();
-                const idea = ideas.find(i => i.id === parseInt(ideaId));
-                let errorMsg = 'Generation failed.';
-                if (idea && idea.questions) {
-                    try {
-                        const q = JSON.parse(idea.questions);
-                        if (q.error) errorMsg = 'Error: ' + q.error;
-                    } catch(e) {}
-                }
                 overlay.style.display = 'none';
-                alert(errorMsg);
+                alert(result.message || 'Generation failed.');
+                window.location.reload();
             } else {
                 overlay.style.display = 'none';
                 alert('Generation timed out. Please try again.');
@@ -291,7 +254,7 @@ async function generateProject() {
     }
 }
 
-async function pollIdeaStatus(ideaId, maxAttempts = 60) {
+async function pollIdeaStatus(ideaId, maxAttempts = 220) {
     const statusText = document.getElementById('generate-status-text');
     const detailText = document.getElementById('generate-status-detail');
     for (let i = 0; i < maxAttempts; i++) {
@@ -304,14 +267,15 @@ async function pollIdeaStatus(ideaId, maxAttempts = 60) {
             if (idea.status === 'generated') {
                 statusText.textContent = 'Project created! Opening...';
                 return { status: 'generated', project_id: idea.project_id };
-            } else if (idea.status === 'active' && idea.questions) {
-                try {
-                    const q = typeof idea.questions === 'string' ? JSON.parse(idea.questions) : idea.questions;
-                    if (q && q.error) return { status: 'error', message: q.error };
-                    if (Array.isArray(q) && q.length > 0) return { status: 'questions' };
-                } catch(e) {}
-            } else if (idea.status === 'error') {
-                return { status: 'error' };
+            }
+            if (idea.status === 'active' && idea.generation_error) {
+                return { status: 'error', message: idea.generation_error };
+            }
+            if (idea.status === 'active' && Array.isArray(idea.questions) && idea.questions.length > 0) {
+                return { status: 'questions' };
+            }
+            if (idea.status === 'error') {
+                return { status: 'error', message: idea.generation_error || 'Generation failed.' };
             }
             const elapsed = (i + 1) * 3;
             statusText.textContent = 'Architect is working...';
@@ -363,17 +327,9 @@ async function submitAnswers(ideaId) {
             } else if (result.status === 'questions') {
                 window.location.reload();
             } else if (result.status === 'error') {
-                const ideaRes = await fetch(`/api/ideas`);
-                const ideas = await ideaRes.json();
-                const idea = ideas.find(i => i.id === parseInt(ideaId));
-                let errorMsg = 'Generation failed.';
-                if (idea && idea.questions) {
-                    try {
-                        const q = JSON.parse(idea.questions);
-                        if (q.error) errorMsg = 'Error: ' + q.error;
-                    } catch(e) {}
-                }
-                alert(errorMsg);
+                overlay.style.display = 'none';
+                alert(result.message || 'Generation failed.');
+                window.location.reload();
             } else {
                 alert('Generation timed out. Please try again.');
             }

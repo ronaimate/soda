@@ -10,6 +10,8 @@ from typing import Optional, Dict, Any
 import git
 import httpx
 
+from .git_utils import build_github_clone_url
+
 logger = logging.getLogger("soda.github")
 
 
@@ -29,26 +31,20 @@ class GitHubService:
     
     def get_authenticated_repo_url(self, repo_url: str) -> str:
         """Convert public repo URL to authenticated URL with credentials."""
-        if not repo_url:
-            return repo_url
-        
-        auth_url = repo_url.replace(
-            "https://github.com/",
-            f"https://{self.username}:{self.token}@github.com/"
-        )
-        auth_url = auth_url.replace(
-            "http://github.com/",
-            f"https://{self.username}:{self.token}@github.com/"
-        )
-        return auth_url
-    
+        if not repo_url or not self.token:
+            return repo_url or ""
+        return build_github_clone_url(repo_url, self.token)
+
     def get_repo_url(self, repo_name: str) -> str:
         """Get public GitHub repository URL."""
         return f"{self.GITHUB_RAW_URL}/{self.username}/{repo_name}"
-    
+
     def get_authenticated_clone_url(self, repo_name: str) -> str:
         """Get authenticated clone URL with credentials."""
-        return f"https://{self.username}:{self.token}@github.com/{self.username}/{repo_name}.git"
+        return build_github_clone_url(
+            f"https://github.com/{self.username}/{repo_name}",
+            self.token,
+        )
     
     async def check_repo_exists(self, repo_name: str) -> bool:
         """Check if a repository exists."""

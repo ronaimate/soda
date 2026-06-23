@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Soda — Setup</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <main class="main-content" style="max-width:560px; margin:40px auto;">
+        <div class="page-header">
+            <h1>🥤 Welcome to Soda</h1>
+            {% if setup_complete %}
+            <p class="help-text">Update your configuration below. You can change API keys anytime in <a href="/settings">Settings</a>.</p>
+            {% else %}
+            <p class="help-text">One-time setup. You can change everything later in Settings.</p>
+            {% endif %}
+        </div>
+
+        <form class="settings-form" id="setup-form" onsubmit="return submitSetup(event)">
+            <h3>AI providers</h3>
+            <p class="help-text">Enable one or more providers and add API keys. Pick which one Architect and Coder should use by default.</p>
+
+            <div class="provider-card">
+                <label class="provider-toggle">
+                    <input type="checkbox" name="provider_opencode_enabled" value="true" {% if settings.get('provider_opencode_enabled', 'false') == 'true' %}checked{% endif %}>
+                    <strong>OpenCode</strong>
+                </label>
+                <label style="margin-top:8px">API Key</label>
+                <input type="password" name="opencode_api_key" value="{{ settings.get('opencode_api_key', '') }}" placeholder="OpenCode API key" class="input-mono provider-key" data-provider="opencode" autocomplete="off">
+            </div>
+
+            <div class="provider-card" style="margin-top:12px">
+                <label class="provider-toggle">
+                    <input type="checkbox" name="provider_openrouter_enabled" value="true" {% if settings.get('provider_openrouter_enabled', 'false') == 'true' %}checked{% endif %}>
+                    <strong>OpenRouter</strong>
+                </label>
+                <label style="margin-top:8px">API Key</label>
+                <input type="password" name="openrouter_api_key" value="{{ settings.get('openrouter_api_key', '') }}" placeholder="sk-or-v1-..." class="input-mono provider-key" data-provider="openrouter" autocomplete="off">
+            </div>
+
+            <div class="provider-card" style="margin-top:12px">
+                <label class="provider-toggle">
+                    <input type="checkbox" name="provider_minimax_enabled" value="true" {% if settings.get('provider_minimax_enabled', 'false') == 'true' %}checked{% endif %}>
+                    <strong>Minimax</strong>
+                </label>
+                <label style="margin-top:8px">API Key</label>
+                <input type="password" name="minimax_api_key" value="{{ settings.get('minimax_api_key', '') }}" placeholder="Minimax API key" class="input-mono provider-key" data-provider="minimax" autocomplete="off">
+            </div>
+
+            <label style="margin-top:16px">Default provider (Architect + Coder)</label>
+            <select name="primary_ai_provider" id="primary-provider">
+                <option value="opencode" {% if primary_ai_provider == 'opencode' %}selected{% endif %}>OpenCode</option>
+                <option value="openrouter" {% if primary_ai_provider == 'openrouter' %}selected{% endif %}>OpenRouter</option>
+                <option value="minimax" {% if primary_ai_provider == 'minimax' %}selected{% endif %}>Minimax</option>
+            </select>
+
+            <label style="margin-top:16px">Planning model (Architect)</label>
+            <select name="planning_model" id="planning-model" required></select>
+            <p class="help-text" id="planning-model-help">Smarter model for planning and review.</p>
+
+            <label style="margin-top:12px">Coding model (Coder)</label>
+            <select name="coding_model" id="coding-model" required></select>
+            <p class="help-text" id="coding-model-help">Faster, cheaper model for writing code.</p>
+
+            <h3 style="margin-top:24px">GitHub</h3>
+            <p class="help-text">Code is saved to a private GitHub repo. Your username is detected from the token.</p>
+            <label>Personal Access Token</label>
+            <input type="password" name="git_token" value="{{ settings.get('git_token', '') }}" required placeholder="ghp_..." class="input-mono" autocomplete="off">
+
+            <button type="submit" class="btn btn-primary" style="margin-top:24px; width:100%">
+                {% if setup_complete %}Save configuration{% else %}Get started{% endif %}
+            </button>
+            {% if setup_complete %}
+            <a href="/ideas" class="btn" style="display:block; text-align:center; margin-top:12px">Back to Ideas</a>
+            {% endif %}
+        </form>
+    </main>
+
+<style>
+.provider-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+}
+.provider-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    margin: 0 !important;
+}
+</style>
+
+<script>
+const MODEL_PRESETS = {{ model_presets_json|safe }};
+const SAVED_PLANNING = {{ default_planning|tojson }};
+const SAVED_CODING = {{ default_coding|tojson }};
+let selectedPlanning = SAVED_PLANNING;
+let selectedCoding = SAVED_CODING;
+let refreshTimer = null;
+
+function getApiKeyForProvider(provider) {
+    const input = document.querySelector(`input.provider-key[data-provider="${provider}"]`);
+    return input ? input.value.trim() : '';
+}
+
+function fillSelect(selectEl, models, selectedId) {
+    selectEl.innerHTML = '';
+    if (!models.length) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'No models available — enter API key first';
+        selectEl.appendChild(opt);
+        return;
+    }
+    for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.name || m.id;
+        selectEl.appendChild(opt);
+    }
+    if (selectedId && [...selectEl.options].some(o => o.value === selectedId)) {
+        selectEl.value = selectedId;
+    }
+}
+
+function presetModels(provider) {
+    const presets = MODEL_PRESETS[provider] || MODEL_PRESETS.opencode;
+    return {
+        planning: presets.planning || [],
+        coding: presets.coding || [],
+    };
+}
+
+async function fetchLiveModels(provider, apiKey) {
+    const fd = new FormData();
+    fd.append('provider', provider);
+    fd.append('api_key', apiKey);
+    const res = await fetch('/api/models/preview', { method: 'POST', body: fd });
+    if (!res.ok) return null;
+    const models = await res.json();
+    return models.length ? models : null;
+}
+
+async function refreshModelDropdowns() {
+    const provider = document.getElementById('primary-provider').value;
+    const planningEl = document.getElementById('planning-model');
+    const codingEl = document.getElementById('coding-model');
+    const planningHelp = document.getElementById('planning-model-help');
+    const codingHelp = document.getElementById('coding-model-help');
+
+    selectedPlanning = planningEl.value || selectedPlanning;
+    selectedCoding = codingEl.value || selectedCoding;
+
+    planningHelp.textContent = 'Loading models…';
+    codingHelp.textContent = 'Loading models…';
+
+    const apiKey = getApiKeyForProvider(provider);
+    let planningModels = null;
+    let codingModels = null;
+    let source = 'recommended presets';
+
+    if (apiKey) {
+        const live = await fetchLiveModels(provider, apiKey);
+        if (live) {
+            planningModels = live;
+            codingModels = live;
+            source = `live list from ${provider}`;
+        }
+    }
+
+    if (!planningModels) {
+        const presets = presetModels(provider);
+        planningModels = presets.planning;
+        codingModels = presets.coding;
+    }
+
+    fillSelect(planningEl, planningModels, selectedPlanning);
+    fillSelect(codingEl, codingModels, selectedCoding);
+
+    planningHelp.textContent = `Planning model (${source}, ${planningModels.length} options)`;
+    codingHelp.textContent = `Coding model (${source}, ${codingModels.length} options)`;
+}
+
+function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(refreshModelDropdowns, 400);
+}
+
+document.getElementById('primary-provider').addEventListener('change', refreshModelDropdowns);
+for (const input of document.querySelectorAll('.provider-key')) {
+    input.addEventListener('input', scheduleRefresh);
+}
+
+refreshModelDropdowns();
+
+async function submitSetup(e) {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    for (const cb of form.querySelectorAll('input[type="checkbox"]')) {
+        if (!cb.checked) fd.set(cb.name, 'false');
+    }
+    const res = await fetch('/setup', { method: 'POST', body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+        window.location = '/ideas';
+    } else {
+        alert(data.detail || 'Setup failed. Check your API keys.');
+    }
+    return false;
+}
+</script>
+</body>
+</html>

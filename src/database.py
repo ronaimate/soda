@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import date, datetime
 from typing import Optional
@@ -55,6 +56,10 @@ class Project(Base):
     repo_url: Mapped[Optional[str]] = mapped_column(String(500))
     merger_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"))
     source_idea_id: Mapped[Optional[int]] = mapped_column(ForeignKey("ideas.id"))
+    run_mode: Mapped[str] = mapped_column(String(10), default="step")  # auto | step
+    pipeline_state: Mapped[str] = mapped_column(String(20), default="idle")
+    current_task_id: Mapped[Optional[int]] = mapped_column(ForeignKey("tasks.id"))
+    advanced_mode: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -72,6 +77,8 @@ class Idea(Base):
         String(20), default="active"
     )  # active, generating, generated, archived
     pending_questions: Mapped[Optional[str]] = mapped_column(Text)  # JSON array of pending questions
+    generation_error: Mapped[Optional[str]] = mapped_column(Text)
+    generation_run_mode: Mapped[str] = mapped_column(String(10), default="step")
     created_by: Mapped[Optional[str]] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -373,6 +380,29 @@ async def init_db():
         except Exception:
             pass
 
+        # Add ideas.generation_error if missing
+        try:
+            result = await conn.exec_driver_sql("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'ideas' AND column_name = 'generation_error'
+            """)
+            if result.first() is None:
+                await conn.exec_driver_sql("ALTER TABLE ideas ADD COLUMN generation_error TEXT")
+        except Exception:
+            pass
+
+        try:
+            result = await conn.exec_driver_sql("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'ideas' AND column_name = 'generation_run_mode'
+            """)
+            if result.first() is None:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE ideas ADD COLUMN generation_run_mode VARCHAR(10) DEFAULT 'step'"
+                )
+        except Exception:
+            pass
+
         # Add projects.source_idea_id if missing
         try:
             result = await conn.exec_driver_sql("""
@@ -383,6 +413,22 @@ async def init_db():
                 await conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN source_idea_id INTEGER REFERENCES ideas(id)")
         except Exception:
             pass
+
+        for col, typedef in [
+            ("run_mode", "VARCHAR(10) DEFAULT 'step'"),
+            ("pipeline_state", "VARCHAR(20) DEFAULT 'idle'"),
+            ("current_task_id", "INTEGER REFERENCES tasks(id)"),
+            ("advanced_mode", "BOOLEAN DEFAULT FALSE"),
+        ]:
+            try:
+                result = await conn.exec_driver_sql(f"""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'projects' AND column_name = '{col}'
+                """)
+                if result.first() is None:
+                    await conn.exec_driver_sql(f"ALTER TABLE projects ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
     
     # Initialize default settings
     async with async_session() as session:
@@ -394,8 +440,11 @@ async def init_db():
             ("provider_opencode_enabled", "false"),
             ("provider_openrouter_enabled", "true"),
             ("provider_minimax_enabled", "false"),
-            ("ai_provider", "openrouter"),
             ("git_default_branch", "main"),
+            ("setup_complete", "false"),
+            ("planning_model", "anthropic/claude-sonnet-4"),
+            ("coding_model", "deepseek/deepseek-chat"),
+            ("primary_ai_provider", "opencode"),
         ]:
             existing = await session.execute(
                 sa_select(GlobalSetting).where(GlobalSetting.key == key)
@@ -404,86 +453,114 @@ async def init_db():
                 session.add(GlobalSetting(key=key, value=default))
         await session.commit()
 
+    # Migrate legacy errors stored in pending_questions
+    async with async_session() as session:
+        result = await session.execute(sa_select(Idea))
+        changed = False
+        for idea in result.scalars().all():
+            if not idea.pending_questions:
+                continue
+            try:
+                parsed = json.loads(idea.pending_questions)
+            except Exception:
+                continue
+            if isinstance(parsed, dict) and parsed.get("error"):
+                if not idea.generation_error:
+                    idea.generation_error = str(parsed["error"])
+                idea.pending_questions = None
+                if idea.status == "error":
+                    idea.status = "active"
+                changed = True
+        if changed:
+            await session.commit()
+
+    # Ensure each task depends on the previous one (sequential pipeline)
+    async with async_session() as session:
+        proj_result = await session.execute(sa_select(Project))
+        dep_added = False
+        for project in proj_result.scalars().all():
+            task_result = await session.execute(
+                sa_select(Task)
+                .where(Task.project_id == project.id)
+                .order_by(Task.position, Task.created_at)
+            )
+            task_list = task_result.scalars().all()
+            for i in range(1, len(task_list)):
+                task_id = task_list[i].id
+                prev_id = task_list[i - 1].id
+                existing = await session.execute(
+                    sa_select(TaskDependency).where(
+                        TaskDependency.task_id == task_id,
+                        TaskDependency.depends_on_id == prev_id,
+                    )
+                )
+                if not existing.scalar_one_or_none():
+                    session.add(TaskDependency(task_id=task_id, depends_on_id=prev_id))
+                    dep_added = True
+        if dep_added:
+            await session.commit()
+
     # Seed default users if none exist
     async with async_session() as session:
         result = await session.execute(sa_select(User))
         if not result.scalars().all():
-            _default_model = "anthropic/claude-sonnet-4"
-
+            _planning_model = "anthropic/claude-sonnet-4"
+            _coding_model = "deepseek/deepseek-chat"
+            _architect_prompt = (
+                "You are the Architect. Analyze project ideas and break them into a sequential task list.\n\n"
+                "Return ONLY valid JSON:\n"
+                'If you need clarification: {"type": "questions", "questions": ["..."]}\n'
+                'If ready: {"type": "generate", "project_name": "...", "project_description": "...", '
+                '"tech_stack": "python-fastapi|node-express|static-html|generic", '
+                '"tasks": [{"title": "...", "description": "...", "complexity": "XS|S|M|L|XL", '
+                '"assignee_role": "coder", "depends_on": []}]}\n'
+            )
+            _coder_prompt = (
+                "You are the Coder. Implement ONLY the assigned task in the working directory.\n"
+                "Create or modify files as needed. When finished, output a brief summary."
+            )
             seed_users = [
                 User(
-                    name="Project Owner",
-                    type="human",
-                    task_types=[],
-                ),
-                User(
-                    name="Task Master",
+                    name="Architect",
                     type="ai",
                     provider="openrouter",
-                    model=_default_model,
-                    task_types=["task_manager"],
-                    system_prompt=(
-                        "You are the Task Master. Analyze project ideas and break them into actionable tasks.\n\n"
-                        "Return ONLY valid JSON:\n"
-                        "If you need clarification:\n"
-                        '{"type": "questions", "questions": ["..."]}\n'
-                        "If ready to generate:\n"
-                        '{"type": "generate", "project_name": "...", "project_description": "...", '
-                        '"tech_stack": "python-fastapi|node-express|static-html|generic", '
-                        '"tasks": [{"title": "...", "description": "...", "complexity": "XS|S|M|L|XL", '
-                        '"assignee_role": "junior|medior|senior", "depends_on": []}]}\n'
-                    ),
+                    model=_planning_model,
+                    task_types=["task_manager", "merger"],
+                    system_prompt=_architect_prompt,
                 ),
                 User(
-                    name="Junior Developer",
+                    name="Coder",
                     type="ai",
                     provider="openrouter",
-                    model=_default_model,
-                    task_types=["xs", "s"],
-                    system_prompt=(
-                        "You are a Junior Developer. You handle small, well-defined tasks with clear requirements.\n\n"
-                        "Rules:\n"
-                        "- ONLY work on the specific task assigned to you\n"
-                        "- Do NOT work on other tasks in the project\n"
-                        "- Create/modify files in the working directory\n"
-                        "- When finished, report back via the callback URL with status=review"
-                    ),
-                ),
-                User(
-                    name="Medior Developer",
-                    type="ai",
-                    provider="openrouter",
-                    model=_default_model,
-                    task_types=["m", "l"],
-                    system_prompt=(
-                        "You are a Medior Developer. You handle moderately complex tasks.\n\n"
-                        "Rules:\n"
-                        "- ONLY work on the specific task assigned to you\n"
-                        "- Do NOT work on other tasks in the project\n"
-                        "- Create/modify files in the working directory\n"
-                        "- When finished, report back via the callback URL with status=review"
-                    ),
-                ),
-                User(
-                    name="Senior Developer",
-                    type="ai",
-                    provider="openrouter",
-                    model=_default_model,
-                    task_types=["xl"],
-                    system_prompt=(
-                        "You are a Senior Developer. You handle complex, large tasks that require deep architectural knowledge.\n\n"
-                        "Rules:\n"
-                        "- ONLY work on the specific task assigned to you\n"
-                        "- Do NOT work on other tasks in the project\n"
-                        "- Create/modify files in the working directory\n"
-                        "- When finished, report back via the callback URL with status=review"
-                    ),
+                    model=_coding_model,
+                    task_types=["xs", "s", "m", "l", "xl"],
+                    system_prompt=_coder_prompt,
                 ),
             ]
-
             for u in seed_users:
                 session.add(u)
             await session.commit()
+
+    # Ensure Architect + Coder exist (upgrade from old seed)
+    async with async_session() as session:
+        for name in ("Architect", "Coder"):
+            existing = await session.execute(sa_select(User).where(User.name == name))
+            if not existing.scalar_one_or_none():
+                if name == "Architect":
+                    session.add(User(
+                        name="Architect", type="ai", provider="openrouter",
+                        model="anthropic/claude-sonnet-4",
+                        task_types=["task_manager", "merger"],
+                        system_prompt="You are the Architect.",
+                    ))
+                else:
+                    session.add(User(
+                        name="Coder", type="ai", provider="openrouter",
+                        model="deepseek/deepseek-chat",
+                        task_types=["xs", "s", "m", "l", "xl"],
+                        system_prompt="You are the Coder.",
+                    ))
+        await session.commit()
 
     # Backfill provider for existing AI users (one-time on startup)
     async with async_session() as session:

@@ -1,20 +1,38 @@
 services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    container_name: soda-postgres
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      POSTGRES_USER: soda
+      POSTGRES_PASSWORD: soda
+      POSTGRES_DB: soda
+    volumes:
+      - soda-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soda -d soda"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   app:
-    image: ghcr.io/ronaimate-agent/soda:latest
+    build: .
+    image: soda:local
     container_name: soda
     restart: unless-stopped
+    network_mode: host
     environment:
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=postgresql+asyncpg://soda:soda@127.0.0.1:5432/soda
     volumes:
       - soda-uploads:/app/uploads
       - soda-data:/root/.local/share
-    networks:
-      - proxy-net
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
+  soda-postgres-data:
   soda-uploads:
   soda-data:
-
-networks:
-  proxy-net:
-    external: true
